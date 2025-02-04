@@ -1,0 +1,7 @@
+jupyter
+torch
+transformers
+pillow
+matplotlib
+aiohttp
+datasets
