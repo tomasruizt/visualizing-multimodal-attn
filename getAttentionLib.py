@@ -239,3 +239,34 @@ def plot_images_grid(
     # Adjust layout to prevent text overlap
     plt.tight_layout(h_pad=1.5, w_pad=1.5)  # Increase spacing between subplots
     return fig
+
+
+def plot_region_attn_progression(model, inputs):
+    mult_attn_sums = compute_mult_attn_sums(
+        model, inputs, layers=list(range(len(model.language_model.model.layers)))
+    )
+
+    names = ["img tokens", "<bos> token", "text tokens"]
+    fig = plt.figure(figsize=(12, 4))
+    ylims = (-0.1, 1.1)
+
+    titles = ["Dest: img tokens", "Dest: <bos> token", "Dest: text tokens"]
+
+    for i in range(3):
+        plt.subplot(1, 3, i + 1)
+        plt.stackplot(
+            range(len(mult_attn_sums)),
+            torch.stack(mult_attn_sums)[:, i, :].T,
+            labels=names,
+        )
+        plt.title(titles[i])
+        plt.ylim(ylims)
+        if i == 1:
+            plt.legend()
+        plt.grid()
+        if i == 0:
+            plt.ylabel("Attention fraction")
+        plt.xlabel("Layer")
+
+    plt.tight_layout()
+    return fig
