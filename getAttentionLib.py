@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from transformers.models.idefics3.modeling_idefics3 import Idefics3ForConditionalGeneration
+
 
 import aiohttp
 import matplotlib.pyplot as plt
@@ -22,9 +24,18 @@ class State:
 
 
 def get_img_grid_sizes(model, inputs):
-    batch_size_, n_img_tokens, hidden_dim_ = model.get_image_features(
-        inputs.pixel_values
-    ).shape
+    
+    if isinstance(model, Idefics3ForConditionalGeneration):
+        vision_outputs = model.model.vision_model(inputs.pixel_values[0].to(dtype=torch.bfloat16))
+        n_img_tokens = vision_outputs.last_hidden_state.shape[1]
+        # IDEFICS uses 14x14 patches for 224x224 images
+        grid_side_len = int(np.sqrt(n_img_tokens))
+        return n_img_tokens, grid_side_len
+
+    else:
+        batch_size_, n_img_tokens, hidden_dim_ = model.get_image_features(
+            inputs.pixel_values
+        ).shape
     grid_side_len = n_img_tokens**0.5
     # print(grid_side_len)
     assert grid_side_len.is_integer()
@@ -45,6 +56,37 @@ def get_attention(model, inputs, layer_idx: int) -> tuple[State, int]:
     hook_handle.remove()
     return state, n_output_tokens
 
+def get_attention_smol_lvm(model, inputs, layer_idx: int) -> tuple[State, int]:
+    attention_maps = []
+    
+    def attention_hook(module, input, output):
+        attention_maps.append(output[0])  # attention weights are typically the second output
+    
+    # Register the hook on the specific layer's attention
+    hook = model.model.text_model.layers[layer_idx].self_attn.register_forward_hook(attention_hook)
+    
+    # Forward pass
+    outputs = model(
+        input_ids=inputs.input_ids,
+        pixel_values=inputs.pixel_values,
+        attention_mask=inputs.get('attention_mask', None),
+        output_hidden_states=True,
+        return_dict=True
+    )
+    
+    # Remove the hook
+    hook.remove()
+    
+    # Get the attention weights from our hook
+    attention_weights = attention_maps[0] if attention_maps else None
+    
+    class State:
+        def __init__(self, outputs, attn_weights):
+            self.outputs = outputs
+            self.attn_weights = attn_weights
+    
+    state = State(outputs.hidden_states[-1], attention_weights)
+    return state, inputs.input_ids.shape[1]
 
 def dump_attn(
     state: State,
@@ -84,7 +126,9 @@ def get_response(
 
 
 def compute_attn_sums(state: State, n_img_tokens: int) -> torch.Tensor:
-    attns = state.attn_weights[0].float()
+    attns = state.attn_weights.float()
+    if len(attns.shape) == 4:
+        attns = attns[0]
     # print("full attns.shape:", attns.shape)
 
     bos_token = n_img_tokens
@@ -165,7 +209,10 @@ def compute_mult_attn_sums(model, inputs, layers: list[int]) -> list[torch.Tenso
     n_img_tokens, _ = get_img_grid_sizes(model, inputs)
     mult_attn_sums = []
     for layer in layers:
-        state, _ = get_attention(model, inputs, layer_idx=layer)
+        if isinstance(model, Idefics3ForConditionalGeneration):
+            state, _ = get_attention_smol_lvm(model, inputs, layer_idx=layer)
+        else:
+            state, _ = get_attention(model, inputs, layer_idx=layer)
         mult_attn_sums.append(compute_attn_sums(state, n_img_tokens))
     return mult_attn_sums
 
