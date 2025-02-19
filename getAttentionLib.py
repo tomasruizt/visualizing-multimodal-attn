@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Any
 
 import aiohttp
 import matplotlib.pyplot as plt
@@ -7,6 +8,9 @@ import PIL
 import torch
 from circuitsvis.attention import attention_heads
 from datasets import load_dataset
+from torch import nn
+from transformers import PaliGemmaForConditionalGeneration, BatchFeature
+from tqdm import trange
 
 
 @dataclass
@@ -19,6 +23,36 @@ class State:
         output_tensor, attn_weights, cache = output
         self.outputs = output_tensor
         self.attn_weights = attn_weights
+
+
+@dataclass
+class Hook:
+    module: nn.Module | None = None
+    input: Any | None = None
+    output: Any | None = None
+
+    def hook(self, module, input, output):
+        assert self.module is None
+        assert self.input is None
+        assert self.output is None
+        self.module = module
+        self.input = input
+        self.output = output
+
+
+@dataclass
+class RestoreActivationHook:
+    """In the forward pass, restores the activations of a given layer and token idx"""
+
+    healthy_activations: torch.Tensor
+    layer_idx: int
+    token_idx: int
+
+    def hook(self, module, input, output):
+        out, cache = output
+        desired = self.healthy_activations[self.layer_idx, self.token_idx]
+        out[0, self.token_idx, :] = desired
+        return out, cache
 
 
 def get_img_grid_sizes(model, inputs):
@@ -270,3 +304,95 @@ def plot_region_attn_progression(model, inputs):
 
     plt.tight_layout()
     return fig
+
+
+def paligemma_merge_text_and_image(
+    self: PaliGemmaForConditionalGeneration, inputs: BatchFeature
+) -> torch.Tensor:
+    """Return input_embeds with image features in the image token positions."""
+
+    input_ids = inputs.input_ids
+    pixel_values = inputs.pixel_values
+
+    inputs_embeds = self.get_input_embeddings()(input_ids)
+    image_features = self.get_image_features(pixel_values)
+
+    special_image_mask = (input_ids == self.config.image_token_index).unsqueeze(-1)
+    special_image_mask = special_image_mask.expand_as(inputs_embeds).to(
+        inputs_embeds.device
+    )
+    if inputs_embeds[special_image_mask].numel() != image_features.numel():
+        image_tokens_in_text = torch.sum(input_ids == self.config.image_token_index)
+        raise ValueError(
+            f"Number of images does not match number of special image tokens in the input text. "
+            f"Got {image_tokens_in_text} image tokens in the text but {image_features.shape[0] * image_features.shape[1]} "
+            "tokens from image embeddings."
+        )
+    image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
+    inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
+    return inputs_embeds
+
+
+def jam_img_embeds(input_embeds: torch.Tensor, num_img_tokens: int) -> torch.Tensor:
+    """Introduce noise in the image tokens. They are assumed to be at the begginning."""
+    new_embeds = input_embeds.clone()
+    noise = torch.randn_like(new_embeds[:, :num_img_tokens, :]) * 3**0.5  # Var=3
+    # noise = torch.zeros_like(new_embeds[:, :num_img_tokens, :])
+    new_embeds[:, :num_img_tokens, :] += noise
+    return new_embeds
+
+
+def get_activations(model, inputs_embeds):
+    handles = []
+    hooks = []
+
+    for layer in model.language_model.model.layers:
+        hook = Hook()
+        hooks.append(hook)
+        handle = layer.register_forward_hook(hook.hook)
+        handles.append(handle)
+
+    try:
+        outputs = model(inputs_embeds=inputs_embeds)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    activations = torch.stack([h.output[0][0] for h in hooks])
+    return activations, outputs
+
+
+def restore_activation(model, unhealthy_embeds, hook: RestoreActivationHook):
+    layer = model.language_model.model.layers[hook.layer_idx]
+    handle = layer.register_forward_hook(hook.hook)
+    try:
+        outputs = model(inputs_embeds=unhealthy_embeds)
+    finally:
+        handle.remove()
+    return outputs
+
+
+def purple_prob(processor, outputs):
+    purple_token = 34999
+    assert processor.tokenizer.decode(purple_token) == "purple"
+    logits = outputs.logits[0, -1, :]
+    return logits.softmax(dim=-1)[purple_token]
+
+
+def loop_over_restore_all_activations(
+    model, processor, healthy_activations, jammed_embeds
+):
+    n_layers = len(model.language_model.model.layers)
+    n_tokens = healthy_activations.shape[1]
+    purple_probs = torch.zeros(n_layers, n_tokens)
+
+    for layer_idx in trange(n_layers):
+        for token_idx in trange(n_tokens, leave=False):
+            restore_hook = RestoreActivationHook(
+                healthy_activations, layer_idx=layer_idx, token_idx=token_idx
+            )
+            outputs = restore_activation(model, jammed_embeds, restore_hook)
+            # print(processor.decode(outputs.logits[0, -1, :].argmax()))
+            purple_probs[layer_idx, token_idx] = purple_prob(processor, outputs)
+
+    return purple_probs
