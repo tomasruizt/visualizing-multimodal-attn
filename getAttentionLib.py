@@ -11,6 +11,7 @@ from datasets import load_dataset
 from torch import nn
 from transformers import PaliGemmaForConditionalGeneration, BatchFeature
 from tqdm import trange
+import plotly.graph_objects as go
 
 
 @dataclass
@@ -195,7 +196,9 @@ def plot_attn_sums(
     return plt.gcf()
 
 
-def compute_mult_attn_sums(model, model_kwargs, layers: list[int], n_img_tokens=None) -> list[torch.Tensor]:
+def compute_mult_attn_sums(
+    model, model_kwargs, layers: list[int], n_img_tokens=None
+) -> list[torch.Tensor]:
     if n_img_tokens is None:
         n_img_tokens, _ = get_img_grid_sizes(model, model_kwargs)
     mult_attn_sums = []
@@ -382,7 +385,7 @@ def purple_prob(processor, outputs):
 
 
 def loop_over_restore_all_activations(
-    model, processor, healthy_activations, jammed_embeds
+    model, processor, healthy_activations, unhealthy_embeds
 ):
     n_layers = len(model.language_model.model.layers)
     n_tokens = healthy_activations.shape[1]
@@ -393,8 +396,90 @@ def loop_over_restore_all_activations(
             restore_hook = RestoreActivationHook(
                 healthy_activations, layer_idx=layer_idx, token_idx=token_idx
             )
-            outputs = restore_activation(model, jammed_embeds, restore_hook)
+            outputs = restore_activation(model, unhealthy_embeds, restore_hook)
             # print(processor.decode(outputs.logits[0, -1, :].argmax()))
             purple_probs[layer_idx, token_idx] = purple_prob(processor, outputs)
 
     return purple_probs
+
+
+def plot_pooled_purple_probs_plotly(
+    pooled_purple_probs: torch.Tensor, inputs_tokens: list[str]
+) -> go.Figure:
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=pooled_purple_probs.T,
+            colorscale="Blues",
+            colorbar=dict(title="Prob (purple)"),
+        )
+    )
+
+    fig.update_layout(
+        yaxis=dict(
+            title="layer",
+            tickmode="array",
+            tickvals=list(range(len(pooled_purple_probs.T))),
+            ticktext=["img_tokens"] + inputs_tokens[256:],
+        ),
+        xaxis=dict(title="token"),
+        width=600,
+        height=400,
+    )
+
+    return fig
+
+
+def plot_pooled_purple_probs_plt(
+    pooled_purple_probs: torch.Tensor, inputs_tokens: list[str]
+):
+    plt.imshow(pooled_purple_probs.T, cmap="Blues")
+    plt.ylabel("layer")
+    plt.xlabel("token")
+    plt.yticks(
+        ticks=range(len(pooled_purple_probs.T)),
+        labels=["img_tokens"] + inputs_tokens[256:],
+    )
+    cbar = plt.colorbar()
+    cbar.set_label("Prob (purple)")
+    plt.tight_layout()
+    return plt.gcf()
+
+
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+
+
+def plot_and_browse_img_token_in_purple_probs(
+    purple_probs: torch.Tensor, inputs_tokens: list[str]
+):
+    # Create a slider widget
+    slider = widgets.IntSlider(
+        value=0,
+        min=0,
+        max=purple_probs.shape[0] - 1,  # num_layers
+        step=1,
+        description="Layer:",
+        continuous_update=False,
+    )
+
+    # Function to update the plot based on the slider value
+    def update_plot(change):
+        layer = change["new"]
+        clear_output(wait=True)
+        display(slider)
+        plt.imshow(purple_probs[layer, :256].reshape(16, 16), cmap="Blues")
+        plt.colorbar().mappable.set_clim(0, 0.7)
+        plt.title(f"Layer {layer}")
+        plt.show()
+
+    # Attach the update function to the slider
+    slider.observe(update_plot, names="value")
+
+    # Initial plot
+    update_plot({"new": 0})
+
+
+def maxpool_img_tokens(purple_probs: torch.Tensor) -> torch.Tensor:
+    imgs_max_pool = purple_probs[:, :256].max(dim=1)[0][:, None]
+    pooled = torch.hstack([imgs_max_pool, purple_probs[:, 256:]])
+    return pooled
