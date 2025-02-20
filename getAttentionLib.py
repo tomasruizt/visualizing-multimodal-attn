@@ -209,10 +209,17 @@ def compute_mult_attn_sums(
 
 
 def plot_mult_attn_sums(
-    model, model_kwargs, layers: list[int], mult_attn_sums=None, stds=None
+    model,
+    model_kwargs,
+    layers: list[int],
+    mult_attn_sums=None,
+    stds=None,
+    n_img_tokens=None,
 ) -> plt.Figure:
     if mult_attn_sums is None:
-        mult_attn_sums = compute_mult_attn_sums(model, model_kwargs, layers)
+        mult_attn_sums = compute_mult_attn_sums(
+            model, model_kwargs, layers, n_img_tokens
+        )
 
     plt.figure(figsize=(12, 4))
     for i, attn_sums in enumerate(mult_attn_sums):
