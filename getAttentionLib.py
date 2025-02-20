@@ -66,14 +66,14 @@ def get_img_grid_sizes(model, inputs):
     return n_img_tokens, grid_side_len
 
 
-def get_attention(model, inputs, layer_idx: int) -> tuple[State, int]:
+def get_attention(model, model_kwargs: dict, layer_idx: int) -> tuple[State, int]:
     all_layers = model.language_model.model.layers
     # print("num layers:", len(all_layers))
     attn_layer = all_layers[layer_idx].self_attn
     state = State()
     # print("state is empty:", state.outputs is None)
     hook_handle = attn_layer.register_forward_hook(state.hook)
-    outputs = model(**inputs, output_attentions=True)
+    outputs = model(**model_kwargs, output_attentions=True)
     n_output_tokens = outputs[0].shape[1]
     # print("state: is empty:", state.outputs is None)
     hook_handle.remove()
@@ -195,20 +195,21 @@ def plot_attn_sums(
     return plt.gcf()
 
 
-def compute_mult_attn_sums(model, inputs, layers: list[int]) -> list[torch.Tensor]:
-    n_img_tokens, _ = get_img_grid_sizes(model, inputs)
+def compute_mult_attn_sums(model, model_kwargs, layers: list[int], n_img_tokens=None) -> list[torch.Tensor]:
+    if n_img_tokens is None:
+        n_img_tokens, _ = get_img_grid_sizes(model, model_kwargs)
     mult_attn_sums = []
     for layer in layers:
-        state, _ = get_attention(model, inputs, layer_idx=layer)
+        state, _ = get_attention(model, model_kwargs, layer_idx=layer)
         mult_attn_sums.append(compute_attn_sums(state, n_img_tokens))
     return mult_attn_sums
 
 
 def plot_mult_attn_sums(
-    model, inputs, layers: list[int], mult_attn_sums=None, stds=None
+    model, model_kwargs, layers: list[int], mult_attn_sums=None, stds=None
 ) -> plt.Figure:
     if mult_attn_sums is None:
-        mult_attn_sums = compute_mult_attn_sums(model, inputs, layers)
+        mult_attn_sums = compute_mult_attn_sums(model, model_kwargs, layers)
 
     plt.figure(figsize=(12, 4))
     for i, attn_sums in enumerate(mult_attn_sums):
@@ -275,10 +276,11 @@ def plot_images_grid(
     return fig
 
 
-def plot_region_attn_progression(model, inputs):
-    mult_attn_sums = compute_mult_attn_sums(
-        model, inputs, layers=list(range(len(model.language_model.model.layers)))
-    )
+def plot_region_attn_progression(model, inputs, mult_attn_sums=None):
+    if mult_attn_sums is None:
+        mult_attn_sums = compute_mult_attn_sums(
+            model, inputs, layers=list(range(len(model.language_model.model.layers)))
+        )
 
     names = ["img tokens", "<bos> token", "text tokens"]
     fig = plt.figure(figsize=(12, 4))
