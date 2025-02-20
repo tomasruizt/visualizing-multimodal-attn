@@ -123,18 +123,25 @@ def compute_attn_sums(state: State, n_img_tokens: int) -> torch.Tensor:
     # print("full attns.shape:", attns.shape)
 
     bos_token = n_img_tokens
-    i2i_attn = attns[:, :n_img_tokens, :n_img_tokens]
-    i2b_attn = attns[:, :n_img_tokens, bos_token : bos_token + 1]
-    i2t_attn = attns[:, :n_img_tokens, bos_token + 1 :]
+    i2i_attn = attns[:, :n_img_tokens, :n_img_tokens]  # images tokens
+    i2b_attn = attns[:, :n_img_tokens, bos_token : bos_token + 1]  # bos token
+    i2t_attn = attns[:, :n_img_tokens, bos_token + 1 : -1]  # text tokens
+    i2f_attn = attns[:, :n_img_tokens, -1:]  # final token
 
     b2i_attn = attns[:, bos_token : bos_token + 1, :n_img_tokens]
     b2b_attn = attns[:, bos_token : bos_token + 1, bos_token : bos_token + 1]
-    b2t_attn = attns[:, bos_token : bos_token + 1, bos_token + 1 :]
+    b2t_attn = attns[:, bos_token : bos_token + 1, bos_token + 1 : -1]
+    b2f_attn = attns[:, bos_token : bos_token + 1, -1:]
 
     t2i_attn = attns[:, bos_token + 1 :, :n_img_tokens]
-    t2t_attn = attns[:, bos_token + 1 :, n_img_tokens:]
     t2b_attn = attns[:, bos_token + 1 :, bos_token : bos_token + 1]
-    t2t_attn = attns[:, bos_token + 1 :, bos_token + 1 :]
+    t2t_attn = attns[:, bos_token + 1 :, bos_token + 1 : -1]
+    t2f_attn = attns[:, bos_token + 1 :, -1:]
+    
+    f2i_attn = attns[:, -1:, :n_img_tokens]
+    f2b_attn = attns[:, -1:, bos_token : bos_token + 1]
+    f2t_attn = attns[:, -1:, bos_token + 1 : -1]
+    f2f_attn = attns[:, -1:, -1:]
 
     attn_sums = torch.tensor(
         [
@@ -142,16 +149,25 @@ def compute_attn_sums(state: State, n_img_tokens: int) -> torch.Tensor:
                 i2i_attn.sum(dim=2).mean(),
                 i2b_attn.sum(dim=2).mean(),
                 i2t_attn.sum(dim=2).mean(),
+                i2f_attn.sum(dim=2).mean(),
             ],
             [
                 b2i_attn.sum(dim=2).mean(),
                 b2b_attn.sum(dim=2).mean(),
                 b2t_attn.sum(dim=2).mean(),
+                b2f_attn.sum(dim=2).mean(),
             ],
             [
                 t2i_attn.sum(dim=2).mean(),
                 t2b_attn.sum(dim=2).mean(),
                 t2t_attn.sum(dim=2).mean(),
+                t2f_attn.sum(dim=2).mean(),
+            ],
+            [
+                f2i_attn.sum(dim=2).mean(),
+                f2b_attn.sum(dim=2).mean(),
+                f2t_attn.sum(dim=2).mean(),
+                f2f_attn.sum(dim=2).mean(),
             ],
         ]
     )
@@ -169,12 +185,13 @@ def plot_attn_sums(
     plt.imshow(attn_sums, cmap="viridis")
     if show_colorbar:
         plt.colorbar()
-    names = ["img tokens", "<bos> token", "text tokens"]
-    plt.xticks(ticks=[0, 1, 2], labels=names)
+    names = ["img tokens", "<bos> token", "text tokens", "final token"]
+    shortnames = ["img \ntokens", "<bos>\ntoken", "text\ntokens", "final\ntoken"]
+    plt.xticks(ticks=[0, 1, 2, 3], labels=shortnames)
     plt.xlabel("Source token(s)")
     if not show_yticks:
         names = [""] * len(names)
-    plt.yticks(ticks=[0, 1, 2], labels=names)
+    plt.yticks(ticks=[0, 1, 2, 3], labels=names)
     if show_ylabel:
         plt.ylabel("Destination token(s)")
     if title != "":
