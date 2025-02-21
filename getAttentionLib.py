@@ -137,7 +137,7 @@ def compute_attn_sums(state: State, n_img_tokens: int) -> torch.Tensor:
     t2b_attn = attns[:, bos_token + 1 :, bos_token : bos_token + 1]
     t2t_attn = attns[:, bos_token + 1 :, bos_token + 1 : -1]
     t2f_attn = attns[:, bos_token + 1 :, -1:]
-    
+
     f2i_attn = attns[:, -1:, :n_img_tokens]
     f2b_attn = attns[:, -1:, bos_token : bos_token + 1]
     f2t_attn = attns[:, -1:, bos_token + 1 : -1]
@@ -401,19 +401,17 @@ def restore_activation(model, unhealthy_embeds, hook: RestoreActivationHook):
     return outputs
 
 
-def purple_prob(processor, outputs):
-    purple_token = 34999
-    assert processor.tokenizer.decode(purple_token) == "purple"
+def tok_prob(outputs, token_idx: int):
     logits = outputs.logits[0, -1, :]
-    return logits.softmax(dim=-1)[purple_token]
+    return logits.softmax(dim=-1)[token_idx]
 
 
 def loop_over_restore_all_activations(
-    model, processor, healthy_activations, unhealthy_embeds
+    model, healthy_activations, unhealthy_embeds, healthy_response_tok_idx: int
 ):
     n_layers = len(model.language_model.model.layers)
     n_tokens = healthy_activations.shape[1]
-    purple_probs = torch.zeros(n_layers, n_tokens)
+    correct_tok_probs = torch.zeros(n_layers, n_tokens)
 
     for layer_idx in trange(n_layers):
         for token_idx in trange(n_tokens, leave=False):
@@ -421,20 +419,20 @@ def loop_over_restore_all_activations(
                 healthy_activations, layer_idx=layer_idx, token_idx=token_idx
             )
             outputs = restore_activation(model, unhealthy_embeds, restore_hook)
-            # print(processor.decode(outputs.logits[0, -1, :].argmax()))
-            purple_probs[layer_idx, token_idx] = purple_prob(processor, outputs)
+            prob = tok_prob(outputs, healthy_response_tok_idx)
+            correct_tok_probs[layer_idx, token_idx] = prob
 
-    return purple_probs
+    return correct_tok_probs
 
 
-def plot_pooled_purple_probs_plotly(
-    pooled_purple_probs: torch.Tensor, inputs_tokens: list[str]
+def plot_pooled_probs_plotly(
+    pooled_probs: torch.Tensor, inputs_tokens: list[str], healthy_response_tok_name: str
 ) -> go.Figure:
     fig = go.Figure(
         data=go.Heatmap(
-            z=pooled_purple_probs.T,
+            z=pooled_probs.T,
             colorscale="Blues",
-            colorbar=dict(title="Prob (purple)"),
+            colorbar=dict(title=f"Prob ({healthy_response_tok_name})"),
         )
     )
 
@@ -442,7 +440,7 @@ def plot_pooled_purple_probs_plotly(
         yaxis=dict(
             title="layer",
             tickmode="array",
-            tickvals=list(range(len(pooled_purple_probs.T))),
+            tickvals=list(range(len(pooled_probs.T))),
             ticktext=["img_tokens"] + inputs_tokens[256:],
         ),
         xaxis=dict(title="token"),
@@ -453,18 +451,18 @@ def plot_pooled_purple_probs_plotly(
     return fig
 
 
-def plot_pooled_purple_probs_plt(
-    pooled_purple_probs: torch.Tensor, inputs_tokens: list[str]
+def plot_pooled_probs_plt(
+    pooled_probs: torch.Tensor, inputs_tokens: list[str], healthy_response_tok_name: str
 ):
-    plt.imshow(pooled_purple_probs.T, cmap="Blues")
+    plt.imshow(pooled_probs.T, cmap="Blues")
     plt.ylabel("layer")
     plt.xlabel("token")
     plt.yticks(
-        ticks=range(len(pooled_purple_probs.T)),
+        ticks=range(len(pooled_probs.T)),
         labels=["img_tokens"] + inputs_tokens[256:],
     )
     cbar = plt.colorbar()
-    cbar.set_label("Prob (purple)")
+    cbar.set_label(f"Prob ({healthy_response_tok_name})")
     plt.tight_layout()
     return plt.gcf()
 
@@ -473,14 +471,12 @@ import ipywidgets as widgets
 from IPython.display import display, clear_output
 
 
-def plot_and_browse_img_token_in_purple_probs(
-    purple_probs: torch.Tensor, inputs_tokens: list[str]
-):
+def plot_and_browse_img_token_in_probs(probs: torch.Tensor):
     # Create a slider widget
     slider = widgets.IntSlider(
         value=0,
         min=0,
-        max=purple_probs.shape[0] - 1,  # num_layers
+        max=probs.shape[0] - 1,  # num_layers
         step=1,
         description="Layer:",
         continuous_update=False,
@@ -491,7 +487,7 @@ def plot_and_browse_img_token_in_purple_probs(
         layer = change["new"]
         clear_output(wait=True)
         display(slider)
-        plt.imshow(purple_probs[layer, :256].reshape(16, 16), cmap="Blues")
+        plt.imshow(probs[layer, :256].reshape(16, 16), cmap="Blues")
         plt.colorbar().mappable.set_clim(0, 0.7)
         plt.title(f"Layer {layer}")
         plt.show()
@@ -503,7 +499,7 @@ def plot_and_browse_img_token_in_purple_probs(
     update_plot({"new": 0})
 
 
-def maxpool_img_tokens(purple_probs: torch.Tensor) -> torch.Tensor:
-    imgs_max_pool = purple_probs[:, :256].max(dim=1)[0][:, None]
-    pooled = torch.hstack([imgs_max_pool, purple_probs[:, 256:]])
+def maxpool_img_tokens(probs: torch.Tensor) -> torch.Tensor:
+    imgs_max_pool = probs[:, :256].max(dim=1)[0][:, None]
+    pooled = torch.hstack([imgs_max_pool, probs[:, 256:]])
     return pooled
