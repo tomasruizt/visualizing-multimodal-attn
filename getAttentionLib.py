@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from transformers.models.idefics3.modeling_idefics3 import Idefics3ForConditionalGeneration
 
+from typing import Any
 
 import aiohttp
 import matplotlib.pyplot as plt
@@ -9,6 +10,10 @@ import PIL
 import torch
 from circuitsvis.attention import attention_heads
 from datasets import load_dataset
+from torch import nn
+from transformers import PaliGemmaForConditionalGeneration, BatchFeature
+from tqdm import trange
+import plotly.graph_objects as go
 
 
 @dataclass
@@ -21,6 +26,36 @@ class State:
         output_tensor, attn_weights, cache = output
         self.outputs = output_tensor
         self.attn_weights = attn_weights
+
+
+@dataclass
+class Hook:
+    module: nn.Module | None = None
+    input: Any | None = None
+    output: Any | None = None
+
+    def hook(self, module, input, output):
+        assert self.module is None
+        assert self.input is None
+        assert self.output is None
+        self.module = module
+        self.input = input
+        self.output = output
+
+
+@dataclass
+class RestoreActivationHook:
+    """In the forward pass, restores the activations of a given layer and token idx"""
+
+    healthy_activations: torch.Tensor
+    layer_idx: int
+    token_idx: int
+
+    def hook(self, module, input, output):
+        out, cache = output
+        desired = self.healthy_activations[self.layer_idx, self.token_idx]
+        out[0, self.token_idx, :] = desired
+        return out, cache
 
 
 def get_img_grid_sizes(model, inputs):
@@ -43,14 +78,14 @@ def get_img_grid_sizes(model, inputs):
     return n_img_tokens, grid_side_len
 
 
-def get_attention(model, inputs, layer_idx: int) -> tuple[State, int]:
+def get_attention(model, model_kwargs: dict, layer_idx: int) -> tuple[State, int]:
     all_layers = model.language_model.model.layers
     # print("num layers:", len(all_layers))
     attn_layer = all_layers[layer_idx].self_attn
     state = State()
     # print("state is empty:", state.outputs is None)
     hook_handle = attn_layer.register_forward_hook(state.hook)
-    outputs = model(**inputs, output_attentions=True)
+    outputs = model(**model_kwargs, output_attentions=True)
     n_output_tokens = outputs[0].shape[1]
     # print("state: is empty:", state.outputs is None)
     hook_handle.remove()
@@ -132,18 +167,25 @@ def compute_attn_sums(state: State, n_img_tokens: int) -> torch.Tensor:
     # print("full attns.shape:", attns.shape)
 
     bos_token = n_img_tokens
-    i2i_attn = attns[:, :n_img_tokens, :n_img_tokens]
-    i2b_attn = attns[:, :n_img_tokens, bos_token : bos_token + 1]
-    i2t_attn = attns[:, :n_img_tokens, bos_token + 1 :]
+    i2i_attn = attns[:, :n_img_tokens, :n_img_tokens]  # images tokens
+    i2b_attn = attns[:, :n_img_tokens, bos_token : bos_token + 1]  # bos token
+    i2t_attn = attns[:, :n_img_tokens, bos_token + 1 : -1]  # text tokens
+    i2f_attn = attns[:, :n_img_tokens, -1:]  # final token
 
     b2i_attn = attns[:, bos_token : bos_token + 1, :n_img_tokens]
     b2b_attn = attns[:, bos_token : bos_token + 1, bos_token : bos_token + 1]
-    b2t_attn = attns[:, bos_token : bos_token + 1, bos_token + 1 :]
+    b2t_attn = attns[:, bos_token : bos_token + 1, bos_token + 1 : -1]
+    b2f_attn = attns[:, bos_token : bos_token + 1, -1:]
 
     t2i_attn = attns[:, bos_token + 1 :, :n_img_tokens]
-    t2t_attn = attns[:, bos_token + 1 :, n_img_tokens:]
     t2b_attn = attns[:, bos_token + 1 :, bos_token : bos_token + 1]
-    t2t_attn = attns[:, bos_token + 1 :, bos_token + 1 :]
+    t2t_attn = attns[:, bos_token + 1 :, bos_token + 1 : -1]
+    t2f_attn = attns[:, bos_token + 1 :, -1:]
+
+    f2i_attn = attns[:, -1:, :n_img_tokens]
+    f2b_attn = attns[:, -1:, bos_token : bos_token + 1]
+    f2t_attn = attns[:, -1:, bos_token + 1 : -1]
+    f2f_attn = attns[:, -1:, -1:]
 
     attn_sums = torch.tensor(
         [
@@ -151,16 +193,25 @@ def compute_attn_sums(state: State, n_img_tokens: int) -> torch.Tensor:
                 i2i_attn.sum(dim=2).mean(),
                 i2b_attn.sum(dim=2).mean(),
                 i2t_attn.sum(dim=2).mean(),
+                i2f_attn.sum(dim=2).mean(),
             ],
             [
                 b2i_attn.sum(dim=2).mean(),
                 b2b_attn.sum(dim=2).mean(),
                 b2t_attn.sum(dim=2).mean(),
+                b2f_attn.sum(dim=2).mean(),
             ],
             [
                 t2i_attn.sum(dim=2).mean(),
                 t2b_attn.sum(dim=2).mean(),
                 t2t_attn.sum(dim=2).mean(),
+                t2f_attn.sum(dim=2).mean(),
+            ],
+            [
+                f2i_attn.sum(dim=2).mean(),
+                f2b_attn.sum(dim=2).mean(),
+                f2t_attn.sum(dim=2).mean(),
+                f2f_attn.sum(dim=2).mean(),
             ],
         ]
     )
@@ -178,12 +229,13 @@ def plot_attn_sums(
     plt.imshow(attn_sums, cmap="viridis")
     if show_colorbar:
         plt.colorbar()
-    names = ["img tokens", "<bos> token", "text tokens"]
-    plt.xticks(ticks=[0, 1, 2], labels=names)
+    names = ["img tokens", "<bos> token", "text tokens", "final token"]
+    shortnames = ["img \ntokens", "<bos>\ntoken", "text\ntokens", "final\ntoken"]
+    plt.xticks(ticks=[0, 1, 2, 3], labels=shortnames)
     plt.xlabel("Source token(s)")
     if not show_yticks:
         names = [""] * len(names)
-    plt.yticks(ticks=[0, 1, 2], labels=names)
+    plt.yticks(ticks=[0, 1, 2, 3], labels=names)
     if show_ylabel:
         plt.ylabel("Destination token(s)")
     if title != "":
@@ -205,23 +257,33 @@ def plot_attn_sums(
     return plt.gcf()
 
 
-def compute_mult_attn_sums(model, inputs, layers: list[int]) -> list[torch.Tensor]:
-    n_img_tokens, _ = get_img_grid_sizes(model, inputs)
+def compute_mult_attn_sums(
+    model, model_kwargs, layers: list[int], n_img_tokens=None
+) -> list[torch.Tensor]:
+    if n_img_tokens is None:
+        n_img_tokens, _ = get_img_grid_sizes(model, model_kwargs)
     mult_attn_sums = []
     for layer in layers:
         if isinstance(model, Idefics3ForConditionalGeneration):
-            state, _ = get_attention_smol_lvm(model, inputs, layer_idx=layer)
+            state, _ = get_attention_smol_lvm(model, model_kwargs, layer_idx=layer)
         else:
-            state, _ = get_attention(model, inputs, layer_idx=layer)
+            state, _ = get_attention(model, model_kwargs, layer_idx=layer)
         mult_attn_sums.append(compute_attn_sums(state, n_img_tokens))
     return mult_attn_sums
 
 
 def plot_mult_attn_sums(
-    model, inputs, layers: list[int], mult_attn_sums=None, stds=None
+    model,
+    model_kwargs,
+    layers: list[int],
+    mult_attn_sums=None,
+    stds=None,
+    n_img_tokens=None,
 ) -> plt.Figure:
     if mult_attn_sums is None:
-        mult_attn_sums = compute_mult_attn_sums(model, inputs, layers)
+        mult_attn_sums = compute_mult_attn_sums(
+            model, model_kwargs, layers, n_img_tokens
+        )
 
     plt.figure(figsize=(12, 4))
     for i, attn_sums in enumerate(mult_attn_sums):
@@ -286,3 +348,205 @@ def plot_images_grid(
     # Adjust layout to prevent text overlap
     plt.tight_layout(h_pad=1.5, w_pad=1.5)  # Increase spacing between subplots
     return fig
+
+
+def plot_region_attn_progression(model, inputs, mult_attn_sums=None):
+    if mult_attn_sums is None:
+        mult_attn_sums = compute_mult_attn_sums(
+            model, inputs, layers=list(range(len(model.language_model.model.layers)))
+        )
+
+    names = ["img tokens", "<bos> token", "text tokens"]
+    fig = plt.figure(figsize=(12, 4))
+    ylims = (-0.1, 1.1)
+
+    titles = ["Dest: img tokens", "Dest: <bos> token", "Dest: text tokens"]
+
+    for i in range(3):
+        plt.subplot(1, 3, i + 1)
+        plt.stackplot(
+            range(len(mult_attn_sums)),
+            torch.stack(mult_attn_sums)[:, i, :].T,
+            labels=names,
+        )
+        plt.title(titles[i])
+        plt.ylim(ylims)
+        if i == 1:
+            plt.legend()
+        plt.grid()
+        if i == 0:
+            plt.ylabel("Attention fraction")
+        plt.xlabel("Layer")
+
+    plt.tight_layout()
+    return fig
+
+
+def paligemma_merge_text_and_image(
+    self: PaliGemmaForConditionalGeneration, inputs: BatchFeature
+) -> torch.Tensor:
+    """Return input_embeds with image features in the image token positions."""
+
+    input_ids = inputs.input_ids
+    pixel_values = inputs.pixel_values
+
+    inputs_embeds = self.get_input_embeddings()(input_ids)
+    image_features = self.get_image_features(pixel_values)
+
+    special_image_mask = (input_ids == self.config.image_token_index).unsqueeze(-1)
+    special_image_mask = special_image_mask.expand_as(inputs_embeds).to(
+        inputs_embeds.device
+    )
+    if inputs_embeds[special_image_mask].numel() != image_features.numel():
+        image_tokens_in_text = torch.sum(input_ids == self.config.image_token_index)
+        raise ValueError(
+            f"Number of images does not match number of special image tokens in the input text. "
+            f"Got {image_tokens_in_text} image tokens in the text but {image_features.shape[0] * image_features.shape[1]} "
+            "tokens from image embeddings."
+        )
+    image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
+    inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
+    return inputs_embeds
+
+
+def jam_img_embeds(input_embeds: torch.Tensor, num_img_tokens: int) -> torch.Tensor:
+    """Introduce noise in the image tokens. They are assumed to be at the begginning."""
+    new_embeds = input_embeds.clone()
+    noise = torch.randn_like(new_embeds[:, :num_img_tokens, :]) * 3**0.5  # Var=3
+    # noise = torch.zeros_like(new_embeds[:, :num_img_tokens, :])
+    new_embeds[:, :num_img_tokens, :] += noise
+    return new_embeds
+
+
+def get_activations(model, inputs_embeds):
+    handles = []
+    hooks = []
+
+    for layer in model.language_model.model.layers:
+        hook = Hook()
+        hooks.append(hook)
+        handle = layer.register_forward_hook(hook.hook)
+        handles.append(handle)
+
+    try:
+        outputs = model(inputs_embeds=inputs_embeds)
+    finally:
+        for handle in handles:
+            handle.remove()
+
+    activations = torch.stack([h.output[0][0] for h in hooks])
+    return activations, outputs
+
+
+def restore_activation(model, unhealthy_embeds, hook: RestoreActivationHook):
+    layer = model.language_model.model.layers[hook.layer_idx]
+    handle = layer.register_forward_hook(hook.hook)
+    try:
+        outputs = model(inputs_embeds=unhealthy_embeds)
+    finally:
+        handle.remove()
+    return outputs
+
+
+def tok_prob(outputs, token_idx: int):
+    logits = outputs.logits[0, -1, :]
+    return logits.softmax(dim=-1)[token_idx]
+
+
+def loop_over_restore_all_activations(
+    model, healthy_activations, unhealthy_embeds, healthy_response_tok_idx: int
+):
+    n_layers = len(model.language_model.model.layers)
+    n_tokens = healthy_activations.shape[1]
+    correct_tok_probs = torch.zeros(n_layers, n_tokens)
+
+    for layer_idx in trange(n_layers):
+        for token_idx in trange(n_tokens, leave=False):
+            restore_hook = RestoreActivationHook(
+                healthy_activations, layer_idx=layer_idx, token_idx=token_idx
+            )
+            outputs = restore_activation(model, unhealthy_embeds, restore_hook)
+            prob = tok_prob(outputs, healthy_response_tok_idx)
+            correct_tok_probs[layer_idx, token_idx] = prob
+
+    return correct_tok_probs
+
+
+def plot_pooled_probs_plotly(
+    pooled_probs: torch.Tensor, inputs_tokens: list[str], healthy_response_tok_name: str
+) -> go.Figure:
+    fig = go.Figure(
+        data=go.Heatmap(
+            z=pooled_probs.T,
+            colorscale="Blues",
+            colorbar=dict(title=f"Prob ({healthy_response_tok_name})"),
+        )
+    )
+
+    fig.update_layout(
+        yaxis=dict(
+            title="layer",
+            tickmode="array",
+            tickvals=list(range(len(pooled_probs.T))),
+            ticktext=["img_tokens"] + inputs_tokens[256:],
+        ),
+        xaxis=dict(title="token"),
+        width=600,
+        height=400,
+    )
+
+    return fig
+
+
+def plot_pooled_probs_plt(
+    pooled_probs: torch.Tensor, inputs_tokens: list[str], healthy_response_tok_name: str
+):
+    plt.imshow(pooled_probs.T, cmap="Blues")
+    plt.ylabel("layer")
+    plt.xlabel("token")
+    plt.yticks(
+        ticks=range(len(pooled_probs.T)),
+        labels=["img_tokens"] + inputs_tokens[256:],
+    )
+    cbar = plt.colorbar()
+    cbar.set_label(f"Prob ({healthy_response_tok_name})")
+    plt.tight_layout()
+    return plt.gcf()
+
+
+import ipywidgets as widgets
+from IPython.display import display, clear_output
+
+
+def plot_and_browse_img_token_in_probs(probs: torch.Tensor):
+    # Create a slider widget
+    slider = widgets.IntSlider(
+        value=0,
+        min=0,
+        max=probs.shape[0] - 1,  # num_layers
+        step=1,
+        description="Layer:",
+        continuous_update=False,
+    )
+
+    # Function to update the plot based on the slider value
+    def update_plot(change):
+        layer = change["new"]
+        clear_output(wait=True)
+        display(slider)
+        plt.imshow(probs[layer, :256].reshape(16, 16), cmap="Blues")
+        plt.colorbar().mappable.set_clim(0, 0.7)
+        plt.title(f"Layer {layer}")
+        plt.show()
+
+    # Attach the update function to the slider
+    slider.observe(update_plot, names="value")
+
+    # Initial plot
+    update_plot({"new": 0})
+
+
+def maxpool_img_tokens(probs: torch.Tensor) -> torch.Tensor:
+    imgs_max_pool = probs[:, :256].max(dim=1)[0][:, None]
+    pooled = torch.hstack([imgs_max_pool, probs[:, 256:]])
+    return pooled
