@@ -226,7 +226,7 @@ def plot_attn_sums(
     show_yticks: bool = True,
     stds: torch.Tensor | None = None,
 ):
-    plt.imshow(attn_sums, cmap="viridis")
+    plt.imshow(attn_sums, cmap="Blues")
     if show_colorbar:
         plt.colorbar()
     names = ["img tokens", "<bos> token", "text tokens", "final token"]
@@ -251,7 +251,7 @@ def plot_attn_sums(
             text,
             ha="center",
             va="center",
-            color="white" if val < 0.5 else "black",
+            color="black" if val < 0.5 else "white",
         )
     plt.tight_layout()
     return plt.gcf()
@@ -409,7 +409,7 @@ def paligemma_merge_text_and_image(
     return inputs_embeds
 
 
-def jam_img_embeds(input_embeds: torch.Tensor, num_img_tokens: int) -> torch.Tensor:
+def gaussian_noising(input_embeds: torch.Tensor, num_img_tokens: int) -> torch.Tensor:
     """Introduce noise in the image tokens. They are assumed to be at the begginning."""
     new_embeds = input_embeds.clone()
     noise = torch.randn_like(new_embeds[:, :num_img_tokens, :]) * 3**0.5  # Var=3
