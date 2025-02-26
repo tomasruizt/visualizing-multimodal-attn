@@ -1,5 +1,7 @@
 from dataclasses import dataclass
-from transformers.models.idefics3.modeling_idefics3 import Idefics3ForConditionalGeneration
+from transformers.models.idefics3.modeling_idefics3 import (
+    Idefics3ForConditionalGeneration,
+)
 
 from typing import Any
 
@@ -59,9 +61,10 @@ class RestoreActivationHook:
 
 
 def get_img_grid_sizes(model, inputs):
-    
     if isinstance(model, Idefics3ForConditionalGeneration):
-        vision_outputs = model.model.vision_model(inputs.pixel_values[0].to(dtype=torch.bfloat16))
+        vision_outputs = model.model.vision_model(
+            inputs.pixel_values[0].to(dtype=torch.bfloat16)
+        )
         n_img_tokens = vision_outputs.last_hidden_state.shape[1]
         # IDEFICS uses 14x14 patches for 224x224 images
         grid_side_len = int(np.sqrt(n_img_tokens))
@@ -91,54 +94,65 @@ def get_attention(model, model_kwargs: dict, layer_idx: int) -> tuple[State, int
     hook_handle.remove()
     return state, n_output_tokens
 
+
 def get_attention_smol_lvm(model, inputs, layer_idx: int) -> tuple[State, int]:
     attention_maps = []
-    
+
     def attention_hook(module, input, output):
-        attention_maps.append(output[0])  # attention weights are typically the second output
-    
+        attention_maps.append(
+            output[0]
+        )  # attention weights are typically the second output
+
     # Register the hook on the specific layer's attention
-    hook = model.model.text_model.layers[layer_idx].self_attn.register_forward_hook(attention_hook)
-    
+    hook = model.model.text_model.layers[layer_idx].self_attn.register_forward_hook(
+        attention_hook
+    )
+
     # Forward pass
     outputs = model(
         input_ids=inputs.input_ids,
         pixel_values=inputs.pixel_values,
-        attention_mask=inputs.get('attention_mask', None),
+        attention_mask=inputs.get("attention_mask", None),
         output_hidden_states=True,
-        return_dict=True
+        return_dict=True,
     )
-    
+
     # Remove the hook
     hook.remove()
-    
+
     # Get the attention weights from our hook
     attention_weights = attention_maps[0] if attention_maps else None
-    
+
     class State:
         def __init__(self, outputs, attn_weights):
             self.outputs = outputs
             self.attn_weights = attn_weights
-    
+
     state = State(outputs.hidden_states[-1], attention_weights)
     return state, inputs.input_ids.shape[1]
 
+
 def dump_attn(
-    state: State,
+    attn_weights: torch.Tensor,
     layer_idx: int,
     name: str,
     tokens: list[str],
     img_path: str,
     grid_side_len: int,
 ) -> None:
+    """
+    attn_weights: Torch tensor of shape [1, n_heads, n_tokens, n_tokens]
+    name: Prefix for the html file name
+    tokens: All tokens in string format, len=n_tokens
+    """
     viz_data = dict(
-        attention=state.attn_weights[0].round(decimals=6).cpu().tolist(),
+        attention=attn_weights[0].round(decimals=6).cpu().tolist(),
         tokens=tokens,
         image=img_path,
         image_grid_dims=[grid_side_len, grid_side_len],
         image_tokens_start=0,
-        max_value=state.attn_weights.max().item() / 100,
-        min_value=state.attn_weights.min().item(),
+        max_value=attn_weights.max().item() / 100,  # deprecate
+        min_value=attn_weights.min().item(),  # deprecate
     )
 
     html = attention_heads(**viz_data)
