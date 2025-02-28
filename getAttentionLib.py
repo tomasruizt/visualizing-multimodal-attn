@@ -145,6 +145,10 @@ def dump_attn(
     name: Prefix for the html file name
     tokens: All tokens in string format, len=n_tokens
     """
+    assert len(attn_weights.shape) == 4
+    assert attn_weights.shape[-1] == len(tokens)
+    assert attn_weights.shape[-2] == len(tokens)
+
     viz_data = dict(
         attention=attn_weights[0].round(decimals=6).cpu().tolist(),
         tokens=tokens,
@@ -174,10 +178,12 @@ def get_response(
     return inputs_tokens, response
 
 
-def compute_attn_sums(state: State, n_img_tokens: int) -> torch.Tensor:
-    attns = state.attn_weights.float()
+def compute_attn_sums(attns: torch.Tensor, n_img_tokens: int) -> torch.Tensor:
     if len(attns.shape) == 4:
+        # remove batch dimension
+        assert attns.shape[0] == 1
         attns = attns[0]
+    assert len(attns.shape) == 3
     # print("full attns.shape:", attns.shape)
 
     bos_token = n_img_tokens
@@ -239,8 +245,11 @@ def plot_attn_sums(
     show_ylabel: bool = True,
     show_yticks: bool = True,
     stds: torch.Tensor | None = None,
+    color_threshold: float = 0.5,
+    cmap: str = "Blues",
+    **imshow_kwargs,
 ):
-    plt.imshow(attn_sums, cmap="Blues")
+    plt.imshow(attn_sums, cmap=cmap, **imshow_kwargs)
     if show_colorbar:
         plt.colorbar()
     names = ["img tokens", "<bos> token", "text tokens", "final token"]
@@ -265,7 +274,7 @@ def plot_attn_sums(
             text,
             ha="center",
             va="center",
-            color="black" if val < 0.5 else "white",
+            color="black" if val < color_threshold else "white",
         )
     plt.tight_layout()
     return plt.gcf()
@@ -282,7 +291,9 @@ def compute_mult_attn_sums(
             state, _ = get_attention_smol_lvm(model, model_kwargs, layer_idx=layer)
         else:
             state, _ = get_attention(model, model_kwargs, layer_idx=layer)
-        mult_attn_sums.append(compute_attn_sums(state, n_img_tokens))
+        mult_attn_sums.append(
+            compute_attn_sums(state.attn_weights.float(), n_img_tokens)
+        )
     return mult_attn_sums
 
 
@@ -293,6 +304,7 @@ def plot_mult_attn_sums(
     mult_attn_sums=None,
     stds=None,
     n_img_tokens=None,
+    **kwargs,
 ) -> plt.Figure:
     if mult_attn_sums is None:
         mult_attn_sums = compute_mult_attn_sums(
@@ -310,6 +322,7 @@ def plot_mult_attn_sums(
             show_yticks=is_first,
             title=f"Layer {layers[i]}",
             stds=stds[i] if stds is not None else None,
+            **kwargs,
         )
     return fig
 
@@ -532,7 +545,8 @@ import ipywidgets as widgets
 from IPython.display import display, clear_output
 
 
-def plot_and_browse_img_token_in_probs(probs: torch.Tensor):
+def plot_and_browse_img_token_in_probs(probs: torch.Tensor, cmax=0.7):
+    assert len(probs.shape) == 2
     # Create a slider widget
     slider = widgets.IntSlider(
         value=0,
@@ -549,7 +563,7 @@ def plot_and_browse_img_token_in_probs(probs: torch.Tensor):
         clear_output(wait=True)
         display(slider)
         plt.imshow(probs[layer, :256].reshape(16, 16), cmap="Blues")
-        plt.colorbar().mappable.set_clim(0, 0.7)
+        plt.colorbar().mappable.set_clim(0, cmax)
         plt.title(f"Layer {layer}")
         plt.show()
 
@@ -564,3 +578,62 @@ def maxpool_img_tokens(probs: torch.Tensor) -> torch.Tensor:
     imgs_max_pool = probs[:, :256].max(dim=1)[0][:, None]
     pooled = torch.hstack([imgs_max_pool, probs[:, 256:]])
     return pooled
+
+
+def plot_fx_norms_progressions(
+    max_norms: torch.Tensor, avg_norms: torch.Tensor, sharey=False
+):
+    """
+    Inputs are the outputs of aggregate_layer_norms()
+    Plot the norm progression for each token type over the layers
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, sharey=sharey, figsize=(7, 3))
+
+    ax1.plot(max_norms.cpu(), marker="x", alpha=0.8)
+    ax1.set_xlabel("Layer")
+    ax1.set_ylabel("Norm Value")
+    ax1.set_title("Max Norms")
+
+    ax2.plot(avg_norms.cpu(), marker="x", alpha=0.8)
+    ax2.set_xlabel("Layer")
+    ax2.set_title("Average Norms")
+    ax2.legend(["Image Tokens", "BOS Token", "Text Tokens", "Final Token"])
+
+    ax1.grid(True)
+    ax2.grid(True)
+    plt.tight_layout()
+
+    return fig
+
+
+def aggregate_layer_norms(
+    all_fx_norms: torch.Tensor,
+    n_img_tokens: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    max_norms = []
+    for layer_idx in range(all_fx_norms.shape[0]):
+        across_heads = all_fx_norms[layer_idx].max(dim=0).values
+        of_img_toks = across_heads[:n_img_tokens].max()
+        of_bos_tok = across_heads[n_img_tokens]
+        of_text_toks = across_heads[n_img_tokens + 1 : -1].max()
+        of_final_tok = across_heads[-1]
+        layer_avg_norms = torch.stack(
+            [of_img_toks, of_bos_tok, of_text_toks, of_final_tok]
+        )
+        max_norms.append(layer_avg_norms)
+    max_norms = torch.stack(max_norms)
+
+    avg_norms = []
+    for layer_idx in range(all_fx_norms.shape[0]):
+        across_heads = all_fx_norms[layer_idx].mean(dim=0)
+        of_img_toks = across_heads[:n_img_tokens].mean()
+        of_bos_tok = across_heads[n_img_tokens]
+        of_text_toks = across_heads[n_img_tokens + 1 : -1].mean()
+        of_final_tok = across_heads[-1]
+        layer_avg_norms = torch.stack(
+            [of_img_toks, of_bos_tok, of_text_toks, of_final_tok]
+        )
+        avg_norms.append(layer_avg_norms)
+    avg_norms = torch.stack(avg_norms)
+
+    return max_norms, avg_norms
