@@ -5,3 +5,5 @@ pillow
 matplotlib
 aiohttp
 datasets
+plotly
+ipython

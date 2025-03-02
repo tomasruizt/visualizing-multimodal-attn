@@ -1,4 +1,7 @@
 from dataclasses import dataclass
+from pathlib import Path
+import PIL.Image
+from tqdm import tqdm
 from transformers.models.idefics3.modeling_idefics3 import (
     Idefics3ForConditionalGeneration,
 )
@@ -25,13 +28,16 @@ class State:
 
     def hook(self, module, input, output):
         # print("State.hook() called")
-        output_tensor, attn_weights, cache = output
+        if len(output) == 3:
+            output_tensor, attn_weights, cache = output
+        else:
+            output_tensor, attn_weights = output
         self.outputs = output_tensor
         self.attn_weights = attn_weights
 
 
 @dataclass
-class Hook:
+class SaveInputOutputHook:
     module: nn.Module | None = None
     input: Any | None = None
     output: Any | None = None
@@ -54,10 +60,16 @@ class RestoreActivationHook:
     token_idx: int
 
     def hook(self, module, input, output):
-        out, cache = output
+        if len(output) == 2:
+            out, cache = output
+        else:
+            out = output[0]
         desired = self.healthy_activations[self.layer_idx, self.token_idx]
         out[0, self.token_idx, :] = desired
-        return out, cache
+        if len(output) == 2:
+            return out, cache
+        else:
+            return (out,)
 
 
 def get_img_grid_sizes(model, inputs):
@@ -286,7 +298,7 @@ def compute_mult_attn_sums(
     if n_img_tokens is None:
         n_img_tokens, _ = get_img_grid_sizes(model, model_kwargs)
     mult_attn_sums = []
-    for layer in layers:
+    for layer in tqdm(layers):
         if isinstance(model, Idefics3ForConditionalGeneration):
             state, _ = get_attention_smol_lvm(model, model_kwargs, layer_idx=layer)
         else:
@@ -331,6 +343,20 @@ def load_vqa_ds(split: str | None = None):
     avoid_timeout = {"client_kwargs": {"timeout": aiohttp.ClientTimeout(total=3600)}}
     ds = load_dataset("HuggingFaceM4/VQAv2", split=split, storage_options=avoid_timeout)
     return ds
+
+
+def load_vqa_samples() -> list[dict[str, Any]]:
+    root = Path("./vqa-samples")
+    assert root.exists()
+    samples = []
+    for i, dir_path in enumerate(root.glob("*")):
+        data = {}
+        data["image"] = PIL.Image.open(dir_path / "image.png")
+        data["question"] = Path(dir_path / "question.txt").read_text()
+        data["answer"] = Path(dir_path / "answer.txt").read_text()
+        data["image_id"] = str(i)
+        samples.append(data)
+    return samples
 
 
 def plot_images_grid(
@@ -446,13 +472,23 @@ def gaussian_noising(input_embeds: torch.Tensor, num_img_tokens: int) -> torch.T
 
 
 def get_activations(model, inputs_embeds):
+    hooks, outputs = run_with_hooks(model, inputs_embeds)
+
+    activations = torch.stack([h.output[0][0] for h in hooks])
+    return activations, outputs
+
+
+def run_with_hooks(model, inputs_embeds, ctor=SaveInputOutputHook, modules=None) -> tuple[list, Any]:
     handles = []
     hooks = []
 
-    for layer in model.language_model.model.layers:
-        hook = Hook()
+    if modules is None:
+        modules = model.language_model.model.layers
+
+    for module in modules:
+        hook = ctor()
         hooks.append(hook)
-        handle = layer.register_forward_hook(hook.hook)
+        handle = module.register_forward_hook(hook.hook)
         handles.append(handle)
 
     try:
@@ -460,9 +496,7 @@ def get_activations(model, inputs_embeds):
     finally:
         for handle in handles:
             handle.remove()
-
-    activations = torch.stack([h.output[0][0] for h in hooks])
-    return activations, outputs
+    return hooks, outputs
 
 
 def restore_activation(model, unhealthy_embeds, hook: RestoreActivationHook):

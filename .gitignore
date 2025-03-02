@@ -3,6 +3,9 @@ CircuitsVis/
 vqa-samples/
 vqa-samples.zip
 
+# Macos
+.DS_Store/
+
 # Generated files
 *.png
 *.pdf
