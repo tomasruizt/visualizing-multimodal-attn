@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+import datetime
+import json
 from pathlib import Path
 import PIL.Image
 from tqdm import tqdm
@@ -6,7 +8,7 @@ from transformers.models.idefics3.modeling_idefics3 import (
     Idefics3ForConditionalGeneration,
 )
 
-from typing import Any
+from typing import Any, Iterable, Literal
 
 import aiohttp
 import matplotlib.pyplot as plt
@@ -228,7 +230,7 @@ def plot_attn_sums(
 
 def compute_mult_attn_sums(
     model, model_kwargs, layers: list[int], n_img_tokens=None
-) -> list[torch.Tensor]:
+) -> torch.Tensor:
     if n_img_tokens is None:
         n_img_tokens, _ = get_img_grid_sizes(model, model_kwargs)
     attns = torch.stack(model(**model_kwargs, output_attentions=True).attentions)
@@ -253,7 +255,7 @@ def plot_mult_attn_sums(
             model, model_kwargs, layers, n_img_tokens
         )
 
-    plt.figure(figsize=(12, 4))
+    plt.figure(figsize=(8, 4))
     for i, attn_sums in enumerate(mult_attn_sums):
         is_first = i == 0
         plt.subplot(1, len(layers), i + 1)
@@ -395,15 +397,41 @@ def paligemma_merge_text_and_image(
 def gaussian_noising(input_embeds: torch.Tensor, num_img_tokens: int) -> torch.Tensor:
     """Introduce noise in the image tokens. They are assumed to be at the begginning."""
     new_embeds = input_embeds.clone()
-    noise = torch.randn_like(new_embeds[:, :num_img_tokens, :]) * 3**0.5  # Var=3
+    img_embed_std = 0.0045  # from compute_img_tokens_embeddings_std(n_vqa_samples=100)
+    noise = (
+        torch.randn_like(new_embeds[:, :num_img_tokens, :]) * 3 * img_embed_std
+    )  # std = 3*0.0045
     # noise = torch.zeros_like(new_embeds[:, :num_img_tokens, :])
     new_embeds[:, :num_img_tokens, :] += noise
+    assert new_embeds.shape == input_embeds.shape
     return new_embeds
 
 
-def get_activations(model, inputs_embeds):
-    hooks, outputs = run_with_hooks(model, inputs_embeds)
+def compute_img_tokens_embeddings_std(
+    model, processor, n_vqa_samples: int, num_img_tokens: int
+):
+    embeds = []
+    for row in unique_vqa_imgs(n_vqa_samples=n_vqa_samples):
+        text = f"<image>Answer en {row['question']}"
+        try:
+            inputs = processor(text=text, images=row["image"], return_tensors="pt").to(
+                model.device
+            )
+        except ValueError as e:  # Unsupported number of image dimensions: 2
+            print(e)
+            continue
+        inputs_embeds = paligemma_merge_text_and_image(model, inputs)
+        embeds.append(inputs_embeds[:, :num_img_tokens, :])
+    embeds = torch.cat(embeds)
+    return embeds.std().item()
 
+
+def get_decoder_layer_outputs(model, inputs_embeds):
+    """
+    Cannot use outputs.hidden_states because they already have a normalization applied.
+    After restoring the activations, the model would normalize them again (this is not an idempotent operation).
+    """
+    hooks, outputs = run_with_hooks(model, inputs_embeds)
     activations = torch.stack([h.output[0][0] for h in hooks])
     return activations, outputs
 
@@ -431,7 +459,9 @@ def run_with_hooks(
     return hooks, outputs
 
 
-def restore_activation(model, unhealthy_embeds, hook: RestoreActivationHook):
+def forward_with_patched_activation(
+    model, unhealthy_embeds, hook: RestoreActivationHook
+):
     layer = model.language_model.model.layers[hook.layer_idx]
     handle = layer.register_forward_hook(hook.hook)
     try:
@@ -446,23 +476,110 @@ def tok_prob(outputs, token_idx: int):
     return logits.softmax(dim=-1)[token_idx]
 
 
-def loop_over_restore_all_activations(
-    model, healthy_activations, unhealthy_embeds, healthy_response_tok_idx: int
+@dataclass
+class ActivationPatchingResult:
+    healthy_tok_response_probs: torch.Tensor
+    healthy_tok_response_logits: torch.Tensor
+    unhealthy_tok_response_probs: torch.Tensor
+    unhealthy_tok_response_logits: torch.Tensor
+    metadata: dict[str, Any] | None = None
+
+    def save(
+        self,
+        directory: Path,
+        health_response_tok: str,
+        unhealthy_response_tok: str,
+        corruption_type: Literal["gaussian_noising", "symmetric_token_replacement"],
+        healthy_img_alias: str,
+        prompt: str,
+        corruption_img_alias: str | None = None,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+        metadata = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "healthy_response_tok": health_response_tok,
+            "unhealthy_response_tok": unhealthy_response_tok,
+            "corruption_type": corruption_type,
+            "healthy_img_alias": healthy_img_alias,
+            "prompt": prompt,
+            "corruption_img_alias": corruption_img_alias,
+        }
+        metadata_path = directory / "metadata.json"
+        metadata_path.write_text(json.dumps(metadata, indent=2))
+        hprobs = directory / "healthy_tok_response_probs.pt"
+        hlogits = directory / "healthy_tok_response_logits.pt"
+        uprobs = directory / "unhealthy_tok_response_probs.pt"
+        ulogits = directory / "unhealthy_tok_response_logits.pt"
+        torch.save(self.healthy_tok_response_probs, hprobs)
+        torch.save(self.healthy_tok_response_logits, hlogits)
+        torch.save(self.unhealthy_tok_response_probs, uprobs)
+        torch.save(self.unhealthy_tok_response_logits, ulogits)
+        print(f"Saved to {directory}")
+
+    @classmethod
+    def load(cls, directory: Path):
+        hprobs = torch.load(directory / "healthy_tok_response_probs.pt")
+        hlogits = torch.load(directory / "healthy_tok_response_logits.pt")
+        uprobs = torch.load(directory / "unhealthy_tok_response_probs.pt")
+        ulogits = torch.load(directory / "unhealthy_tok_response_logits.pt")
+        metadata_path = directory / "metadata.json"
+        metadata = json.loads(metadata_path.read_text())
+        return cls(
+            healthy_tok_response_probs=hprobs,
+            healthy_tok_response_logits=hlogits,
+            unhealthy_tok_response_probs=uprobs,
+            unhealthy_tok_response_logits=ulogits,
+            metadata=metadata,
+        )
+
+
+def patch_all_activations(
+    model,
+    healthy_activations,
+    unhealthy_embeds,
+    healthy_response_tok_idx: int,
+    unhealthy_response_tok_idx: int,
 ):
     n_layers = len(model.language_model.model.layers)
     n_tokens = healthy_activations.shape[1]
-    correct_tok_probs = torch.zeros(n_layers, n_tokens)
 
-    for layer_idx in trange(n_layers):
-        for token_idx in trange(n_tokens, leave=False):
+    healthy_tok_response_probs = torch.zeros(n_layers, n_tokens)
+    healthy_tok_response_logits = torch.zeros(n_layers, n_tokens)
+    unhealthy_tok_response_probs = torch.zeros(n_layers, n_tokens)
+    unhealthy_tok_response_logits = torch.zeros(n_layers, n_tokens)
+
+    progress_bar = tqdm(total=n_layers * n_tokens)
+
+    for layer_idx in range(n_layers):
+        for token_idx in range(n_tokens):
             restore_hook = RestoreActivationHook(
                 healthy_activations, layer_idx=layer_idx, token_idx=token_idx
             )
-            outputs = restore_activation(model, unhealthy_embeds, restore_hook)
-            prob = tok_prob(outputs, healthy_response_tok_idx)
-            correct_tok_probs[layer_idx, token_idx] = prob
+            outputs = forward_with_patched_activation(
+                model, unhealthy_embeds, restore_hook
+            )
 
-    return correct_tok_probs
+            logits = outputs.logits[0, -1, :]
+            hlogits = logits[healthy_response_tok_idx]
+            healthy_tok_response_logits[layer_idx, token_idx] = hlogits
+            ulogits = logits[unhealthy_response_tok_idx]
+            unhealthy_tok_response_logits[layer_idx, token_idx] = ulogits
+
+            probs = logits.softmax(dim=-1)
+            hprob = probs[healthy_response_tok_idx]
+            healthy_tok_response_probs[layer_idx, token_idx] = hprob
+            uprob = probs[unhealthy_response_tok_idx]
+            unhealthy_tok_response_probs[layer_idx, token_idx] = uprob
+
+            progress_bar.update(1)
+
+    result = ActivationPatchingResult(
+        healthy_tok_response_probs=healthy_tok_response_probs,
+        healthy_tok_response_logits=healthy_tok_response_logits,
+        unhealthy_tok_response_probs=unhealthy_tok_response_probs,
+        unhealthy_tok_response_logits=unhealthy_tok_response_logits,
+    )
+    return result
 
 
 def plot_pooled_probs_plotly(
@@ -656,34 +773,44 @@ def aggregate_layer_norms(
     return max_norms, avg_norms
 
 
+def unique_vqa_imgs(n_vqa_samples: int) -> Iterable[dict[str, Any]]:
+    ds = load_vqa_ds(split="train")
+    seen_imgs = set()
+    progress_bar = tqdm(total=n_vqa_samples)
+
+    for row in ds:
+        if row["image_id"] not in seen_imgs:
+            seen_imgs.add(row["image_id"])
+            yield row
+            progress_bar.update(1)
+
+        if len(seen_imgs) >= n_vqa_samples:
+            progress_bar.close()
+            return
+
+    progress_bar.close()
+
+
 def compute_mult_attn_sums_over_vqa(
     model, processor, n_vqa_samples: int, layers: list[int]
 ) -> torch.Tensor:
-    ds = load_vqa_ds(split="train")
-
     attens_tensor = []
     responses = []
     imgs = []
-    seen_imgs = set()
-    progress_bar = tqdm(total=n_vqa_samples)
-    for row in ds:
-        if len(imgs) >= n_vqa_samples:
-            break
+    n_fails = 0
 
-        if row["image_id"] in seen_imgs:
-            continue
-        seen_imgs.add(row["image_id"])
-
+    for row in unique_vqa_imgs(n_vqa_samples):
         text = f"<image>Answer en {row['question']}"
         try:
             inputs = processor(text=text, images=row["image"], return_tensors="pt").to(
                 model.device
             )
-        except ValueError:  # Unsupported number of image dimensions: 2
+        except ValueError as e:  # Unsupported number of image dimensions: 2
+            print(e)
+            n_fails += 1
             continue
 
         response = get_response(model, processor, text, row["image"])[1]
-        # responses.append(response.replace("\n", " A: ").replace("Answer en", "Q:"))
         responses.append(response)
 
         imgs.append(row["image"])
@@ -691,9 +818,36 @@ def compute_mult_attn_sums_over_vqa(
         mult_attn_sums = compute_mult_attn_sums(model, inputs, layers=layers)
         attens_tensor.append(mult_attn_sums)
 
-        progress_bar.update(1)
-    progress_bar.close()
+        if len(imgs) >= n_vqa_samples:
+            break
 
     stacked_attens = torch.stack(attens_tensor)
-    assert stacked_attens.shape == (n_vqa_samples, len(layers), 4, 4)
+    assert stacked_attens.shape == (n_vqa_samples - n_fails, len(layers), 4, 4)
     return stacked_attens, imgs, responses
+
+
+def compute_mult_attn_sums_over_noisy_vqa(
+    model, processor, n_vqa_samples: int, n_img_tokens: int
+):
+    stacked_attens = []
+    for row in unique_vqa_imgs(n_vqa_samples=n_vqa_samples):
+        text = f"<image>Answer en {row['question']}"
+        try:
+            inputs = processor(text=text, images=row["image"], return_tensors="pt").to(
+                model.device
+            )
+        except ValueError as e:  # Unsupported number of image dimensions: 2
+            print(e)
+            continue
+
+        inputs_embeds = paligemma_merge_text_and_image(model, inputs)
+        gn_inputs_embeds = gaussian_noising(inputs_embeds, num_img_tokens=n_img_tokens)
+        mult_attn_sums = compute_mult_attn_sums(
+            model,
+            {"inputs_embeds": gn_inputs_embeds},
+            layers=[0, 15, 25],
+            n_img_tokens=n_img_tokens,
+        )
+        stacked_attens.append(mult_attn_sums)
+    stacked_attens = torch.stack(stacked_attens)
+    return stacked_attens
