@@ -22,21 +22,6 @@ import plotly.graph_objects as go
 
 
 @dataclass
-class State:
-    outputs: torch.Tensor | None = None
-    attn_weights: torch.Tensor | None = None
-
-    def hook(self, module, input, output):
-        # print("State.hook() called")
-        if len(output) == 3:
-            output_tensor, attn_weights, cache = output
-        else:
-            output_tensor, attn_weights = output
-        self.outputs = output_tensor
-        self.attn_weights = attn_weights
-
-
-@dataclass
 class SaveInputOutputHook:
     module: nn.Module | None = None
     input: Any | None = None
@@ -91,57 +76,6 @@ def get_img_grid_sizes(model, inputs):
     assert grid_side_len.is_integer()
     grid_side_len = int(grid_side_len)
     return n_img_tokens, grid_side_len
-
-
-def get_attention(model, model_kwargs: dict, layer_idx: int) -> tuple[State, int]:
-    all_layers = model.language_model.model.layers
-    # print("num layers:", len(all_layers))
-    attn_layer = all_layers[layer_idx].self_attn
-    state = State()
-    # print("state is empty:", state.outputs is None)
-    hook_handle = attn_layer.register_forward_hook(state.hook)
-    outputs = model(**model_kwargs, output_attentions=True)
-    n_output_tokens = outputs[0].shape[1]
-    # print("state: is empty:", state.outputs is None)
-    hook_handle.remove()
-    return state, n_output_tokens
-
-
-def get_attention_smol_lvm(model, inputs, layer_idx: int) -> tuple[State, int]:
-    attention_maps = []
-
-    def attention_hook(module, input, output):
-        attention_maps.append(
-            output[0]
-        )  # attention weights are typically the second output
-
-    # Register the hook on the specific layer's attention
-    hook = model.model.text_model.layers[layer_idx].self_attn.register_forward_hook(
-        attention_hook
-    )
-
-    # Forward pass
-    outputs = model(
-        input_ids=inputs.input_ids,
-        pixel_values=inputs.pixel_values,
-        attention_mask=inputs.get("attention_mask", None),
-        output_hidden_states=True,
-        return_dict=True,
-    )
-
-    # Remove the hook
-    hook.remove()
-
-    # Get the attention weights from our hook
-    attention_weights = attention_maps[0] if attention_maps else None
-
-    class State:
-        def __init__(self, outputs, attn_weights):
-            self.outputs = outputs
-            self.attn_weights = attn_weights
-
-    state = State(outputs.hidden_states[-1], attention_weights)
-    return state, inputs.input_ids.shape[1]
 
 
 def dump_attn(
@@ -297,15 +231,11 @@ def compute_mult_attn_sums(
 ) -> list[torch.Tensor]:
     if n_img_tokens is None:
         n_img_tokens, _ = get_img_grid_sizes(model, model_kwargs)
-    mult_attn_sums = []
-    for layer in tqdm(layers):
-        if isinstance(model, Idefics3ForConditionalGeneration):
-            state, _ = get_attention_smol_lvm(model, model_kwargs, layer_idx=layer)
-        else:
-            state, _ = get_attention(model, model_kwargs, layer_idx=layer)
-        mult_attn_sums.append(
-            compute_attn_sums(state.attn_weights.float(), n_img_tokens)
-        )
+    attns = torch.stack(model(**model_kwargs, output_attentions=True).attentions)
+    mult_attn_sums = torch.stack(
+        [compute_attn_sums(attns[l], n_img_tokens) for l in layers]
+    )
+    mult_attn_sums = mult_attn_sums.float()
     return mult_attn_sums
 
 
@@ -419,7 +349,7 @@ def plot_region_attn_progression(model, inputs, mult_attn_sums=None):
         plt.subplot(1, 3, i + 1)
         plt.stackplot(
             range(len(mult_attn_sums)),
-            torch.stack(mult_attn_sums)[:, i, :].T,
+            mult_attn_sums[:, i, :].T,
             labels=names,
         )
         plt.title(titles[i])
@@ -478,7 +408,9 @@ def get_activations(model, inputs_embeds):
     return activations, outputs
 
 
-def run_with_hooks(model, inputs_embeds, ctor=SaveInputOutputHook, modules=None) -> tuple[list, Any]:
+def run_with_hooks(
+    model, inputs_embeds, ctor=SaveInputOutputHook, modules=None
+) -> tuple[list, Any]:
     handles = []
     hooks = []
 
@@ -560,8 +492,14 @@ def plot_pooled_probs_plotly(
 
 
 def plot_pooled_probs_plt(
-    pooled_probs: torch.Tensor, inputs_tokens: list[str], healthy_response_tok_name: str
+    pooled_probs: torch.Tensor,
+    inputs_tokens: list[str],
+    healthy_response_tok_name: str,
+    cmax=None,
 ):
+    if cmax is None:
+        cmax = pooled_probs.max().item()
+
     plt.imshow(pooled_probs.T, cmap="Blues")
     plt.ylabel("layer")
     plt.xlabel("token")
@@ -571,6 +509,7 @@ def plot_pooled_probs_plt(
     )
     cbar = plt.colorbar()
     cbar.set_label(f"Prob ({healthy_response_tok_name})")
+    cbar.mappable.set_clim(0, cmax)
     plt.tight_layout()
     return plt.gcf()
 
@@ -596,9 +535,8 @@ def plot_and_browse_img_token_in_probs(probs: torch.Tensor, cmax=0.7):
         layer = change["new"]
         clear_output(wait=True)
         display(slider)
-        plt.imshow(probs[layer, :256].reshape(16, 16), cmap="Blues")
-        plt.colorbar().mappable.set_clim(0, cmax)
-        plt.title(f"Layer {layer}")
+        layer_probs = probs[layer, :256].reshape(16, 16)
+        plot_img_probs(layer_probs, title=f"Layer {layer}", cmax=cmax)
         plt.show()
 
     # Attach the update function to the slider
@@ -608,9 +546,54 @@ def plot_and_browse_img_token_in_probs(probs: torch.Tensor, cmax=0.7):
     update_plot({"new": 0})
 
 
-def maxpool_img_tokens(probs: torch.Tensor) -> torch.Tensor:
-    imgs_max_pool = probs[:, :256].max(dim=1)[0][:, None]
-    pooled = torch.hstack([imgs_max_pool, probs[:, 256:]])
+def plot_img_probs(probs: torch.Tensor, title: str, cmax=0.7, img=None, ax=None):
+    h, w = probs.shape
+    if ax is None:
+        _, ax = plt.subplots()
+
+    # Display image if provided
+    if img is not None:
+        ax.imshow(img, alpha=1.0)
+        img_height, img_width = (
+            img.shape[:2] if len(img.shape) >= 2 else (img.shape[0], 1)
+        )
+        extent = [0, img_width, img_height, 0]
+        im = ax.imshow(probs, cmap="Blues", alpha=0.8, extent=extent)
+
+        # Set ticks (1 to 16)
+        ax.set_xticks(np.linspace(0, img_width, w + 1)[:-1])
+        ax.set_yticks(np.linspace(0, img_height, h + 1)[:-1])
+    else:
+        im = ax.imshow(probs, cmap="Blues")
+        ax.set_xticks(range(w))
+        ax.set_yticks(range(h))
+
+    # Set tick labels (1 to h/w)
+    ax.set_xticklabels(range(1, w + 1))
+    ax.set_yticklabels(range(1, h + 1))
+
+    # Add minor ticks for grid
+    ax.set_xticks(np.arange(-0.5, w, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, h, 1), minor=True)
+    ax.grid(which="minor", color="w", linestyle="-", linewidth=2)
+    # Hide minor ticks for cleaner appearance
+    ax.tick_params(which="minor", bottom=False, left=False)
+
+    # Add colorbar and title
+    cbar = plt.colorbar(im)
+    cbar.mappable.set_clim(0, cmax)
+    ax.set_title(title)
+
+
+def maxpool_img_tokens(probs: torch.Tensor, n_img_tokens: int) -> torch.Tensor:
+    imgs_max_pool = probs[:, :n_img_tokens].max(dim=1)[0][:, None]
+    pooled = torch.hstack([imgs_max_pool, probs[:, n_img_tokens:]])
+    return pooled
+
+
+def avgpool_img_tokens(probs: torch.Tensor) -> torch.Tensor:
+    imgs_avg_pool = probs[:, :256].mean(dim=1)[:, None]
+    pooled = torch.hstack([imgs_avg_pool, probs[:, 256:]])
     return pooled
 
 
@@ -671,3 +654,46 @@ def aggregate_layer_norms(
     avg_norms = torch.stack(avg_norms)
 
     return max_norms, avg_norms
+
+
+def compute_mult_attn_sums_over_vqa(
+    model, processor, n_vqa_samples: int, layers: list[int]
+) -> torch.Tensor:
+    ds = load_vqa_ds(split="train")
+
+    attens_tensor = []
+    responses = []
+    imgs = []
+    seen_imgs = set()
+    progress_bar = tqdm(total=n_vqa_samples)
+    for row in ds:
+        if len(imgs) >= n_vqa_samples:
+            break
+
+        if row["image_id"] in seen_imgs:
+            continue
+        seen_imgs.add(row["image_id"])
+
+        text = f"<image>Answer en {row['question']}"
+        try:
+            inputs = processor(text=text, images=row["image"], return_tensors="pt").to(
+                model.device
+            )
+        except ValueError:  # Unsupported number of image dimensions: 2
+            continue
+
+        response = get_response(model, processor, text, row["image"])[1]
+        # responses.append(response.replace("\n", " A: ").replace("Answer en", "Q:"))
+        responses.append(response)
+
+        imgs.append(row["image"])
+
+        mult_attn_sums = compute_mult_attn_sums(model, inputs, layers=layers)
+        attens_tensor.append(mult_attn_sums)
+
+        progress_bar.update(1)
+    progress_bar.close()
+
+    stacked_attens = torch.stack(attens_tensor)
+    assert stacked_attens.shape == (n_vqa_samples, len(layers), 4, 4)
+    return stacked_attens, imgs, responses
