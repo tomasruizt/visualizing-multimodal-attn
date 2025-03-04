@@ -8,7 +8,6 @@ if __name__ == "__main__":
     model, processor = load_pg2_model_and_processor()
 
     text = "<image>Answer en what is the frisbee's color?"
-    n_img_tokens = 256
 
     healthy_img_path = "imgs/frisbee2.png"
     healthy_tok_str = "blue"

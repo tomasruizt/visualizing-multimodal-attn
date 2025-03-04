@@ -122,11 +122,11 @@ def dump_attn(
 
 
 def get_response(
-    model, processor, text: str, image: PIL.Image.Image
+    model, processor, text: str, image: PIL.Image.Image, max_new_tokens: int = 100
 ) -> tuple[list[str], str]:
     inputs = processor(text=text, images=image, return_tensors="pt").to(model.device)
     inputs_tokens = [processor.decode(id) for id in inputs.input_ids[0]]
-    outputs = model.generate(**inputs, max_new_tokens=100)
+    outputs = model.generate(**inputs, max_new_tokens=max_new_tokens)
     response: str = processor.tokenizer.decode(outputs[0], skip_special_tokens=True)
     return inputs_tokens, response
 
@@ -498,6 +498,9 @@ class ActivationPatchingResult:
         corruption_type: Literal["gaussian_noising", "symmetric_token_replacement"],
         healthy_img_alias: str,
         prompt: str,
+        token_strings: list[str],
+        unhealthy_run_unhealthy_tok_logit: float,
+        unhealthy_run_healthy_tok_logit: float,
         corruption_img_alias: str | None = None,
     ):
         directory = Path(directory)
@@ -510,6 +513,9 @@ class ActivationPatchingResult:
             "healthy_img_alias": healthy_img_alias,
             "prompt": prompt,
             "corruption_img_alias": corruption_img_alias,
+            "unhealthy_run_unhealthy_tok_logit": unhealthy_run_unhealthy_tok_logit,
+            "unhealthy_run_healthy_tok_logit": unhealthy_run_healthy_tok_logit,
+            "token_strings": token_strings,
         }
         metadata_path = directory / "metadata.json"
         metadata_path.write_text(json.dumps(metadata, indent=2))
@@ -621,6 +627,8 @@ def plot_pooled_probs_plt(
     inputs_tokens: list[str],
     healthy_response_tok_name: str,
     cmax=None,
+    cmin=None,
+    cmap="Blues",
     ax=None,
     show_ylabel=True,
 ):
@@ -630,7 +638,7 @@ def plot_pooled_probs_plt(
     if ax is None:
         _, ax = plt.subplots()
 
-    im = ax.imshow(pooled_probs.T, cmap="Blues")
+    im = ax.imshow(pooled_probs.T, cmap=cmap)
     if show_ylabel:
         ax.set_ylabel("token")
     ax.set_xlabel("layer")
@@ -640,7 +648,7 @@ def plot_pooled_probs_plt(
     )
     cbar = plt.colorbar(im, ax=ax)
     cbar.set_label(f"Prob ({healthy_response_tok_name})")
-    cbar.mappable.set_clim(0, cmax)
+    cbar.mappable.set_clim(cmin, cmax)
     plt.tight_layout()
     return ax.figure
 
@@ -677,7 +685,15 @@ def plot_and_browse_img_token_in_probs(probs: torch.Tensor, cmax=0.7):
     update_plot({"new": 0})
 
 
-def plot_img_probs(probs: torch.Tensor, title: str, cmax=None, img=None, ax=None):
+def plot_img_probs(
+    probs: torch.Tensor,
+    title: str,
+    cmax=None,
+    cmin=None,
+    cmap="Blues",
+    img=None,
+    ax=None,
+):
     h, w = probs.shape
     if ax is None:
         _, ax = plt.subplots()
@@ -689,13 +705,13 @@ def plot_img_probs(probs: torch.Tensor, title: str, cmax=None, img=None, ax=None
             img.shape[:2] if len(img.shape) >= 2 else (img.shape[0], 1)
         )
         extent = [0, img_width, img_height, 0]
-        im = ax.imshow(probs, cmap="Blues", alpha=0.8, extent=extent)
+        im = ax.imshow(probs, cmap=cmap, alpha=0.8, extent=extent)
 
         # Set ticks (1 to 16)
         ax.set_xticks(np.linspace(0, img_width, w + 1)[:-1])
         ax.set_yticks(np.linspace(0, img_height, h + 1)[:-1])
     else:
-        im = ax.imshow(probs, cmap="Blues")
+        im = ax.imshow(probs, cmap=cmap)
         ax.set_xticks(range(w))
         ax.set_yticks(range(h))
 
@@ -712,7 +728,7 @@ def plot_img_probs(probs: torch.Tensor, title: str, cmax=None, img=None, ax=None
 
     # Add colorbar and title
     cbar = plt.colorbar(im)
-    cbar.mappable.set_clim(0, cmax)
+    cbar.mappable.set_clim(cmin, cmax)
     ax.set_title(title)
 
     ax.set_ylabel("image patch")
@@ -878,6 +894,7 @@ def plot_img_and_text_probs_side_by_side(
     token_strings: list[str],
     token_str: str,
     cmax=None,
+    is_probabilities: bool = True,
 ):
     frisbee2_pooled_purple_probs = maxpool_img_tokens(probs, n_img_tokens=n_img_tokens)
     frisbee2_avg_img_probs = probs[:, :n_img_tokens].max(dim=0)[0].reshape(16, 16)
@@ -887,14 +904,25 @@ def plot_img_and_text_probs_side_by_side(
 
     # Left plot: image probabilities
     plt.sca(ax1)
-    import numpy as np
+
+    if is_probabilities:
+        title = f"Max Prob ({token_str}) over all layers"
+        cmin = 0
+        cmap = "Blues"
+    else:
+        title = "Max Logit Diff over all layers"
+        cmax = probs.abs().max()
+        cmin = -cmax
+        cmap = "RdBu"
 
     plot_img_probs(
         probs=frisbee2_avg_img_probs,
-        title=f"Max Prob ({token_str}) over all layers",
+        title=title,
         # img=np.array(image),
         ax=ax1,
         cmax=cmax,
+        cmin=cmin,
+        cmap=cmap,
     )
     # plt.grid(True, which="minor")
 
@@ -907,6 +935,8 @@ def plot_img_and_text_probs_side_by_side(
         ax=ax2,
         show_ylabel=False,
         cmax=cmax,
+        cmin=cmin,
+        cmap=cmap,
     )
     # No need to close pooled_fig since we're directly plotting to ax2
 
@@ -994,6 +1024,13 @@ def image_symmetric_token_replacement(
         unhealthy_response_tok_idx=unhealthy_tok_idx,
     )
 
+    unhealthy_outputs = model(**unhealthy_inputs)
+    unhealthy_logits = unhealthy_outputs.logits[0, -1, :]
+
+    token_strings = processor.tokenizer.convert_ids_to_tokens(
+        healthy_inputs.input_ids[0]
+    )
+
     patching_result.save(
         directory=tgt_directory,
         health_response_tok=healthy_tok_str,
@@ -1002,4 +1039,7 @@ def image_symmetric_token_replacement(
         corruption_img_alias=unhealthy_img_alias,
         healthy_img_alias=healthy_img_alias,
         prompt=text,
+        token_strings=token_strings,
+        unhealthy_run_unhealthy_tok_logit=unhealthy_logits[unhealthy_tok_idx].item(),
+        unhealthy_run_healthy_tok_logit=unhealthy_logits[healthy_tok_idx].item(),
     )
