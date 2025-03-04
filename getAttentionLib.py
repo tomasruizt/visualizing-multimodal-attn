@@ -127,11 +127,12 @@ def get_response(
 
 
 def compute_attn_sums(attns: torch.Tensor, n_img_tokens: int) -> torch.Tensor:
+    """attns is a tensor of shape [1, n_heads, n_tokens, n_tokens]"""
     if len(attns.shape) == 4:
         # remove batch dimension
-        assert attns.shape[0] == 1
+        assert attns.shape[0] == 1, f"attns.shape: {attns.shape}"
         attns = attns[0]
-    assert len(attns.shape) == 3
+    assert len(attns.shape) == 3, f"attns.shape: {attns.shape}"
     # print("full attns.shape:", attns.shape)
 
     bos_token = n_img_tokens
@@ -229,10 +230,8 @@ def plot_attn_sums(
 
 
 def compute_mult_attn_sums(
-    model, model_kwargs, layers: list[int], n_img_tokens=None
+    model, model_kwargs, layers: list[int], n_img_tokens: int
 ) -> torch.Tensor:
-    if n_img_tokens is None:
-        n_img_tokens, _ = get_img_grid_sizes(model, model_kwargs)
     attns = torch.stack(model(**model_kwargs, output_attentions=True).attentions)
     mult_attn_sums = torch.stack(
         [compute_attn_sums(attns[l], n_img_tokens) for l in layers]
@@ -248,6 +247,7 @@ def plot_mult_attn_sums(
     mult_attn_sums=None,
     stds=None,
     n_img_tokens=None,
+    figsize=(8, 4),
     **kwargs,
 ) -> plt.Figure:
     if mult_attn_sums is None:
@@ -255,7 +255,7 @@ def plot_mult_attn_sums(
             model, model_kwargs, layers, n_img_tokens
         )
 
-    plt.figure(figsize=(8, 4))
+    fig = plt.figure(figsize=figsize)
     for i, attn_sums in enumerate(mult_attn_sums):
         is_first = i == 0
         plt.subplot(1, len(layers), i + 1)
@@ -268,6 +268,7 @@ def plot_mult_attn_sums(
             stds=stds[i] if stds is not None else None,
             **kwargs,
         )
+    fig.tight_layout()
     return fig
 
 
@@ -801,7 +802,7 @@ def unique_vqa_imgs(n_vqa_samples: int) -> Iterable[dict[str, Any]]:
 
 
 def compute_mult_attn_sums_over_vqa(
-    model, processor, n_vqa_samples: int, layers: list[int]
+    model, processor, n_vqa_samples: int, layers: list[int], n_img_tokens: int
 ) -> torch.Tensor:
     attens_tensor = []
     responses = []
@@ -824,7 +825,9 @@ def compute_mult_attn_sums_over_vqa(
 
         imgs.append(row["image"])
 
-        mult_attn_sums = compute_mult_attn_sums(model, inputs, layers=layers)
+        mult_attn_sums = compute_mult_attn_sums(
+            model, inputs, layers=layers, n_img_tokens=n_img_tokens
+        )
         attens_tensor.append(mult_attn_sums)
 
         if len(imgs) >= n_vqa_samples:
@@ -836,7 +839,7 @@ def compute_mult_attn_sums_over_vqa(
 
 
 def compute_mult_attn_sums_over_noisy_vqa(
-    model, processor, n_vqa_samples: int, n_img_tokens: int
+    model, processor, n_vqa_samples: int, layers: list[int], n_img_tokens: int
 ):
     stacked_attens = []
     for row in unique_vqa_imgs(n_vqa_samples=n_vqa_samples):
@@ -854,7 +857,7 @@ def compute_mult_attn_sums_over_noisy_vqa(
         mult_attn_sums = compute_mult_attn_sums(
             model,
             {"inputs_embeds": gn_inputs_embeds},
-            layers=[0, 15, 25],
+            layers=layers,
             n_img_tokens=n_img_tokens,
         )
         stacked_attens.append(mult_attn_sums)
@@ -890,9 +893,33 @@ def plot_img_and_text_probs_side_by_side(
         token_strings,
         healthy_response_tok_name="purple",
         ax=ax2,
-        show_ylabel=False
+        show_ylabel=False,
     )
     # No need to close pooled_fig since we're directly plotting to ax2
 
     plt.tight_layout()
     return fig
+
+
+def plot_metric_with_std_over_layers(metric, ylabel: str):
+    """metric is a tensor of shape (n_examples, n_layers)"""
+
+    plt.figure(figsize=(4, 2.5))
+    plt.plot(metric.mean(dim=0), marker="o")
+    # Plot mean with standard deviation bands
+    means = metric.mean(dim=0)
+    stds = metric.std(dim=0)
+    x = range(len(means))
+
+    plt.fill_between(
+        x, means - stds, means + stds, alpha=0.3, color="blue", label="±1 std"
+    )
+    plt.legend()
+
+    plt.ylabel(ylabel)
+    plt.xlabel("Layer")
+    plt.xticks(x[::2], range(1, len(x) + 1)[::2])
+    plt.grid()
+    plt.tight_layout()
+
+    return plt.gcf()
