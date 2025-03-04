@@ -613,22 +613,28 @@ def plot_pooled_probs_plt(
     inputs_tokens: list[str],
     healthy_response_tok_name: str,
     cmax=None,
+    ax=None,
+    show_ylabel=True,
 ):
     if cmax is None:
         cmax = pooled_probs.max().item()
 
-    plt.imshow(pooled_probs.T, cmap="Blues")
-    plt.ylabel("layer")
-    plt.xlabel("token")
-    plt.yticks(
+    if ax is None:
+        _, ax = plt.subplots()
+
+    im = ax.imshow(pooled_probs.T, cmap="Blues")
+    if show_ylabel:
+        ax.set_ylabel("token")
+    ax.set_xlabel("layer")
+    ax.set_yticks(
         ticks=range(len(pooled_probs.T)),
         labels=["img_tokens"] + inputs_tokens[256:],
     )
-    cbar = plt.colorbar()
+    cbar = plt.colorbar(im, ax=ax)
     cbar.set_label(f"Prob ({healthy_response_tok_name})")
     cbar.mappable.set_clim(0, cmax)
     plt.tight_layout()
-    return plt.gcf()
+    return ax.figure
 
 
 import ipywidgets as widgets
@@ -700,6 +706,9 @@ def plot_img_probs(probs: torch.Tensor, title: str, cmax=0.7, img=None, ax=None)
     cbar = plt.colorbar(im)
     cbar.mappable.set_clim(0, cmax)
     ax.set_title(title)
+    
+    ax.set_ylabel("image patch")
+    ax.set_xlabel("image patch")
 
 
 def maxpool_img_tokens(probs: torch.Tensor, n_img_tokens: int) -> torch.Tensor:
@@ -851,3 +860,39 @@ def compute_mult_attn_sums_over_noisy_vqa(
         stacked_attens.append(mult_attn_sums)
     stacked_attens = torch.stack(stacked_attens)
     return stacked_attens
+
+
+def plot_img_and_text_probs_side_by_side(
+    probs: torch.Tensor, n_img_tokens: int, token_strings: list[str]
+):
+    frisbee2_pooled_purple_probs = maxpool_img_tokens(probs, n_img_tokens=n_img_tokens)
+    frisbee2_avg_img_probs = probs[:, :n_img_tokens].max(dim=0)[0].reshape(16, 16)
+
+    # Create a side-by-side plot with img probs on the left and pooled probs on the right
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+
+    # Left plot: image probabilities
+    plt.sca(ax1)
+    import numpy as np
+
+    plot_img_probs(
+        probs=frisbee2_avg_img_probs,
+        title="Max Prob (purple) over all layers",
+        # img=np.array(image),
+        ax=ax1,
+    )
+    # plt.grid(True, which="minor")
+
+    # Right plot: pooled probabilities
+    plt.sca(ax2)
+    plot_pooled_probs_plt(
+        frisbee2_pooled_purple_probs,
+        token_strings,
+        healthy_response_tok_name="purple",
+        ax=ax2,
+        show_ylabel=False
+    )
+    # No need to close pooled_fig since we're directly plotting to ax2
+
+    plt.tight_layout()
+    return fig
