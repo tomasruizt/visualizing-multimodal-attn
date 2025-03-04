@@ -7,3 +7,4 @@ aiohttp
 datasets
 plotly
 ipython
+accelerate

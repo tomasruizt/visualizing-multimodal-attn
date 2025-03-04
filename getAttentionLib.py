@@ -968,16 +968,18 @@ def plot_metric_with_std_over_layers(metric, ylabel: str):
     return plt.gcf()
 
 
-def load_pg2_model_and_processor(device="cuda"):
+def load_pg2_model_and_processor(compile=False):
     torch.set_grad_enabled(False)  # avoid blowing up mem
     model_id = "google/paligemma2-3b-pt-224"
-    model = (
-        PaliGemmaForConditionalGeneration.from_pretrained(
-            model_id, torch_dtype=torch.bfloat16
-        )
-        .to(device)
-        .eval()
-    )
+    model = PaliGemmaForConditionalGeneration.from_pretrained(
+        model_id,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        attn_implementation="flash_attention_2",
+    ).eval()
+    torch.set_float32_matmul_precision("high")
+    if compile:
+        model = torch.compile(model)
     processor = PaliGemmaProcessor.from_pretrained(model_id)
     return model, processor
 
