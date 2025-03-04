@@ -2,6 +2,7 @@ from dataclasses import dataclass
 import datetime
 import json
 from pathlib import Path
+from PIL import Image
 import PIL.Image
 from tqdm import tqdm
 from transformers.models.idefics3.modeling_idefics3 import (
@@ -18,7 +19,11 @@ import torch
 from circuitsvis.attention import attention_heads
 from datasets import load_dataset
 from torch import nn
-from transformers import PaliGemmaForConditionalGeneration, BatchFeature
+from transformers import (
+    PaliGemmaForConditionalGeneration,
+    BatchFeature,
+    PaliGemmaProcessor,
+)
 from tqdm import trange
 import plotly.graph_objects as go
 
@@ -487,7 +492,7 @@ class ActivationPatchingResult:
 
     def save(
         self,
-        directory: Path,
+        directory: Path | str,
         health_response_tok: str,
         unhealthy_response_tok: str,
         corruption_type: Literal["gaussian_noising", "symmetric_token_replacement"],
@@ -495,6 +500,7 @@ class ActivationPatchingResult:
         prompt: str,
         corruption_img_alias: str | None = None,
     ):
+        directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
         metadata = {
             "timestamp": datetime.datetime.now().isoformat(),
@@ -518,7 +524,8 @@ class ActivationPatchingResult:
         print(f"Saved to {directory}")
 
     @classmethod
-    def load(cls, directory: Path):
+    def load(cls, directory: Path | str):
+        directory = Path(directory)
         hprobs = torch.load(directory / "healthy_tok_response_probs.pt")
         hlogits = torch.load(directory / "healthy_tok_response_logits.pt")
         uprobs = torch.load(directory / "unhealthy_tok_response_probs.pt")
@@ -670,7 +677,7 @@ def plot_and_browse_img_token_in_probs(probs: torch.Tensor, cmax=0.7):
     update_plot({"new": 0})
 
 
-def plot_img_probs(probs: torch.Tensor, title: str, cmax=0.7, img=None, ax=None):
+def plot_img_probs(probs: torch.Tensor, title: str, cmax=None, img=None, ax=None):
     h, w = probs.shape
     if ax is None:
         _, ax = plt.subplots()
@@ -707,7 +714,7 @@ def plot_img_probs(probs: torch.Tensor, title: str, cmax=0.7, img=None, ax=None)
     cbar = plt.colorbar(im)
     cbar.mappable.set_clim(0, cmax)
     ax.set_title(title)
-    
+
     ax.set_ylabel("image patch")
     ax.set_xlabel("image patch")
 
@@ -866,7 +873,11 @@ def compute_mult_attn_sums_over_noisy_vqa(
 
 
 def plot_img_and_text_probs_side_by_side(
-    probs: torch.Tensor, n_img_tokens: int, token_strings: list[str]
+    probs: torch.Tensor,
+    n_img_tokens: int,
+    token_strings: list[str],
+    token_str: str,
+    cmax=None,
 ):
     frisbee2_pooled_purple_probs = maxpool_img_tokens(probs, n_img_tokens=n_img_tokens)
     frisbee2_avg_img_probs = probs[:, :n_img_tokens].max(dim=0)[0].reshape(16, 16)
@@ -880,9 +891,10 @@ def plot_img_and_text_probs_side_by_side(
 
     plot_img_probs(
         probs=frisbee2_avg_img_probs,
-        title="Max Prob (purple) over all layers",
+        title=f"Max Prob ({token_str}) over all layers",
         # img=np.array(image),
         ax=ax1,
+        cmax=cmax,
     )
     # plt.grid(True, which="minor")
 
@@ -891,9 +903,10 @@ def plot_img_and_text_probs_side_by_side(
     plot_pooled_probs_plt(
         frisbee2_pooled_purple_probs,
         token_strings,
-        healthy_response_tok_name="purple",
+        healthy_response_tok_name=token_str,
         ax=ax2,
         show_ylabel=False,
+        cmax=cmax,
     )
     # No need to close pooled_fig since we're directly plotting to ax2
 
@@ -923,3 +936,70 @@ def plot_metric_with_std_over_layers(metric, ylabel: str):
     plt.tight_layout()
 
     return plt.gcf()
+
+
+def load_pg2_model_and_processor(device="cuda"):
+    torch.set_grad_enabled(False)  # avoid blowing up mem
+    model_id = "google/paligemma2-3b-pt-224"
+    model = (
+        PaliGemmaForConditionalGeneration.from_pretrained(
+            model_id, torch_dtype=torch.bfloat16
+        )
+        .to(device)
+        .eval()
+    )
+    processor = PaliGemmaProcessor.from_pretrained(model_id)
+    return model, processor
+
+
+def image_symmetric_token_replacement(
+    model,
+    processor,
+    text: str,
+    healthy_img_alias: Path | str,
+    healthy_tok_str: str,
+    unhealthy_img_alias: Path | str,
+    unhealthy_tok_str: str,
+    tgt_directory: Path | str,
+    healthy_img: Image.Image | None = None,
+    unhealthy_img: Image.Image | None = None,
+):
+    """Runs STR patching using by using the unhealthy image as the corruption image"""
+
+    if healthy_img is None:
+        healthy_img = Image.open(healthy_img_alias)
+    if unhealthy_img is None:
+        unhealthy_img = Image.open(unhealthy_img_alias)
+
+    healthy_tok_idx = processor.tokenizer.encode(healthy_tok_str)
+    assert processor.tokenizer.decode(healthy_tok_idx) == healthy_tok_str
+    healthy_inputs = processor(text=text, images=healthy_img, return_tensors="pt").to(
+        model.device
+    )
+    healthy_embeds = paligemma_merge_text_and_image(model, healthy_inputs)
+    healthy_activations, _ = get_decoder_layer_outputs(model, healthy_embeds)
+
+    unhealthy_tok_idx = processor.tokenizer.encode(unhealthy_tok_str)
+    assert processor.tokenizer.decode(unhealthy_tok_idx) == unhealthy_tok_str
+    unhealthy_inputs = processor(
+        text=text, images=unhealthy_img, return_tensors="pt"
+    ).to(model.device)
+    unhealthy_embeds = paligemma_merge_text_and_image(model, unhealthy_inputs)
+
+    patching_result: ActivationPatchingResult = patch_all_activations(
+        model=model,
+        healthy_activations=healthy_activations,
+        unhealthy_embeds=unhealthy_embeds,
+        healthy_response_tok_idx=healthy_tok_idx,
+        unhealthy_response_tok_idx=unhealthy_tok_idx,
+    )
+
+    patching_result.save(
+        directory=tgt_directory,
+        health_response_tok=healthy_tok_str,
+        unhealthy_response_tok=unhealthy_tok_str,
+        corruption_type="symmetric_token_replacement",
+        corruption_img_alias=unhealthy_img_alias,
+        healthy_img_alias=healthy_img_alias,
+        prompt=text,
+    )
