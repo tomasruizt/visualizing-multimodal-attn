@@ -10,7 +10,7 @@ from getAttentionLib import (
 if __name__ == "__main__":
     model, processor = load_pg2_model_and_processor(compile=True)
 
-    n_vqa_samples = 20
+    n_vqa_samples = 40
     rows = list(unique_vqa_imgs(n_vqa_samples + 1))
     for idx, (healthy_row, unhealthy_row) in enumerate(zip(rows[:-1], rows[1:])):
         tgt_dir = f"vqa_patching/{idx:03d}"

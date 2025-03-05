@@ -654,6 +654,8 @@ def plot_pooled_probs_plt(
     ax=None,
     show_ylabel=True,
     figsize=(8, 6),
+    fraction=0.03,
+    aspect=1.5
 ):
     if cmax is None:
         cmax = pooled_probs.max().item()
@@ -665,11 +667,15 @@ def plot_pooled_probs_plt(
     if show_ylabel:
         ax.set_ylabel("token")
     ax.set_xlabel("layer")
+    ax.set_xticks(
+        ticks=range(len(pooled_probs))[::2],
+        labels=list(range(1, len(pooled_probs) + 1))[::2],
+    )
     ax.set_yticks(
         ticks=range(len(pooled_probs.T)),
         labels=["img_tokens"] + inputs_tokens[n_img_tokens:],
     )
-    cbar = plt.colorbar(im, ax=ax, fraction=0.03)
+    cbar = plt.colorbar(im, ax=ax, fraction=fraction, aspect=aspect)
     cbar.set_label(cbar_label)
     cbar.mappable.set_clim(cmin, cmax)
     plt.tight_layout()
@@ -943,8 +949,8 @@ def plot_img_and_text_probs_side_by_side(
         title=title,
         # img=np.array(image),
         ax=ax1,
-        cmax=cmax,
-        cmin=cmin,
+        cmax=cmax * 0.3 if not is_probabilities else cmax,
+        cmin=cmin * 0.3 if not is_probabilities else cmin,
         cmap=cmap,
     )
     # plt.grid(True, which="minor")
