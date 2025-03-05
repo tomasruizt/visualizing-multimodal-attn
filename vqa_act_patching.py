@@ -4,21 +4,27 @@ import numpy as np
 from getAttentionLib import (
     get_response,
     get_vqa_balanced_pairs,
+    guassian_noising_activation_patching,
     image_symmetric_token_replacement,
     load_pg2_model_and_processor,
     unique_vqa_imgs,
 )
 
 
+# either "gn" for gaussian noising or "str" for symmetric token replacement
+shortname: str = "gn"
+assert shortname in ["gn", "str"]
+
 if __name__ == "__main__":
     model, processor = load_pg2_model_and_processor(compile=True)
+    n_img_tokens = 256
 
     n_vqa_samples = 100
     for idx, (healthy_row, unhealthy_row) in enumerate(
         get_vqa_balanced_pairs(n_vqa_samples)
     ):
-        tgt_dir = f"vqa_patching/{idx:03d}"
-        if Path(tgt_dir).exists():
+        tgt_dir = Path(f"vqa_patching/{shortname}/{idx:03d}")
+        if tgt_dir.exists():
             print(f"Skipping {tgt_dir} because it already exists")
             continue
 
@@ -45,15 +51,29 @@ if __name__ == "__main__":
         unhealthy_tok_str = processor.decode(uoutputs[0, -1])
         print(f"{unhealthy_tok_str=}")
 
-        image_symmetric_token_replacement(
-            model=model,
-            processor=processor,
-            text=healthy_text,
-            healthy_img_alias=healthy_row["image_id"],
-            healthy_img=healthy_img,
-            healthy_tok_str=healthy_tok_str,
-            unhealthy_img_alias=unhealthy_row["image_id"],
-            unhealthy_img=unhealthy_img,
-            unhealthy_tok_str=unhealthy_tok_str,
-            tgt_directory=tgt_dir,
-        )
+        if shortname == "str":
+            image_symmetric_token_replacement(
+                model=model,
+                processor=processor,
+                text=healthy_text,
+                healthy_img_alias=healthy_row["image_id"],
+                healthy_img=healthy_img,
+                healthy_tok_str=healthy_tok_str,
+                unhealthy_img_alias=unhealthy_row["image_id"],
+                unhealthy_img=unhealthy_img,
+                unhealthy_tok_str=unhealthy_tok_str,
+                tgt_directory=tgt_dir,
+            )
+        elif shortname == "gn":
+            guassian_noising_activation_patching(
+                model=model,
+                processor=processor,
+                text=healthy_text,
+                healthy_img_alias=healthy_row["image_id"],
+                healthy_img=healthy_img,
+                healthy_tok_str=healthy_tok_str,
+                tgt_directory=tgt_dir,
+                n_img_tokens=n_img_tokens,
+            )
+        else:
+            raise ValueError(f"Unknown activation patching type: {shortname}")

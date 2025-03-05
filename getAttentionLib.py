@@ -1115,6 +1115,64 @@ def image_symmetric_token_replacement(
     )
 
 
+def guassian_noising_activation_patching(
+    model,
+    processor,
+    text: str,
+    healthy_img_alias: Path | str,
+    healthy_tok_str: str,
+    tgt_directory: Path | str,
+    n_img_tokens: int,
+    healthy_img: Image.Image | None = None,
+):
+    if healthy_img is None:
+        healthy_img = Image.open(healthy_img_alias)
+
+    healthy_inputs = processor(text=text, images=healthy_img, return_tensors="pt").to(
+        model.device
+    )
+    healthy_embeds = paligemma_merge_text_and_image(model, healthy_inputs)
+    healthy_activation, _ = get_decoder_layer_outputs(model, healthy_embeds)
+
+    unhealthy_embeds = gaussian_noising(healthy_embeds, num_img_tokens=n_img_tokens)
+
+    healthy_tok_idx = processor.tokenizer.encode(healthy_tok_str)
+    unhealthy_tok_idx = healthy_tok_idx
+
+    unhealthy_outputs = model(inputs_embeds=unhealthy_embeds)
+    unhealthy_logits = unhealthy_outputs.logits[0, -1, :]
+
+    healthy_outputs = model(**healthy_inputs)
+    healthy_logits = healthy_outputs.logits[0, -1, :]
+
+    token_strings = processor.tokenizer.convert_ids_to_tokens(
+        healthy_inputs.input_ids[0]
+    )
+
+    patching_result: ActivationPatchingResult = patch_all_activations(
+        model=model,
+        healthy_activations=healthy_activation,
+        unhealthy_embeds=unhealthy_embeds,
+        healthy_response_tok_idx=healthy_tok_idx,
+        unhealthy_response_tok_idx=unhealthy_tok_idx,
+    )
+
+    patching_result.save(
+        directory=tgt_directory,
+        health_response_tok=healthy_tok_str,
+        unhealthy_response_tok=healthy_tok_str,
+        corruption_type="gaussian_noising",
+        corruption_img_alias=None,
+        healthy_img_alias=healthy_img_alias,
+        prompt=text,
+        token_strings=token_strings,
+        unhealthy_run_unhealthy_tok_logit=unhealthy_logits[unhealthy_tok_idx].item(),
+        unhealthy_run_healthy_tok_logit=unhealthy_logits[healthy_tok_idx].item(),
+        healthy_run_unhealthy_tok_logit=healthy_logits[unhealthy_tok_idx].item(),
+        healthy_run_healthy_tok_logit=healthy_logits[healthy_tok_idx].item(),
+    )
+
+
 def cluster_logits_diffs(logits_diffs: torch.Tensor, n_img_tokens: int) -> torch.Tensor:
     """Logits diffs is a tensor of shape (n_layers, n_tokens)"""
     img_tokens = logits_diffs[:, :n_img_tokens].max(dim=1)[0]
