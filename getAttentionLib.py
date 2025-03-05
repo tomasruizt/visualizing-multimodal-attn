@@ -858,6 +858,7 @@ def unique_vqa_imgs(n_vqa_samples: int) -> Iterable[VQARow]:
 def get_vqa_balanced_pairs(n_vqa_samples: int) -> Iterable[tuple[VQARow, VQARow]]:
     dataset = load_vqa_ds(split="train")
 
+    # wget https://s3.amazonaws.com/cvmlp/vqa/mscoco/vqa/v2_Complementary_Pairs_Train_mscoco.zip
     file = (
         Path(__file__).parent
         / "vqa_dataset/v2_mscoco_train2014_complementary_pairs.json"

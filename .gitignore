@@ -2,6 +2,8 @@
 CircuitsVis/
 vqa-samples/
 vqa-samples.zip
+vqa_dataset/
+*.zip
 
 # Macos
 .DS_Store/
