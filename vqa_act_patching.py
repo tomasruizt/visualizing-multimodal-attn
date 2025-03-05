@@ -15,6 +15,10 @@ from getAttentionLib import (
 shortname: str = "gn"
 assert shortname in ["gn", "str"]
 
+xs_std = 3 * 0.0045  # from compute_img_tokens_embeddings_std(n_vqa_samples=100)
+s_std = 10 * xs_std
+gn_std = xs_std
+
 if __name__ == "__main__":
     model, processor = load_pg2_model_and_processor(compile=True)
     n_img_tokens = 256
@@ -74,6 +78,7 @@ if __name__ == "__main__":
                 healthy_tok_str=healthy_tok_str,
                 tgt_directory=tgt_dir,
                 n_img_tokens=n_img_tokens,
+                gaussian_noise_std=gn_std,
             )
         else:
             raise ValueError(f"Unknown activation patching type: {shortname}")

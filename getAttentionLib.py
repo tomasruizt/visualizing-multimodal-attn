@@ -400,14 +400,12 @@ def paligemma_merge_text_and_image(
     return inputs_embeds
 
 
-def gaussian_noising(input_embeds: torch.Tensor, num_img_tokens: int) -> torch.Tensor:
+def gaussian_noising(
+    input_embeds: torch.Tensor, num_img_tokens: int, std: float
+) -> torch.Tensor:
     """Introduce noise in the image tokens. They are assumed to be at the begginning."""
     new_embeds = input_embeds.clone()
-    img_embed_std = 0.0045  # from compute_img_tokens_embeddings_std(n_vqa_samples=100)
-    noise = (
-        torch.randn_like(new_embeds[:, :num_img_tokens, :]) * 3 * img_embed_std
-    )  # std = 3*0.0045
-    # noise = torch.zeros_like(new_embeds[:, :num_img_tokens, :])
+    noise = torch.randn_like(new_embeds[:, :num_img_tokens, :]) * std
     new_embeds[:, :num_img_tokens, :] += noise
     assert new_embeds.shape == input_embeds.shape
     return new_embeds
@@ -427,6 +425,11 @@ def compute_img_tokens_embeddings_std(
         inputs_embeds = paligemma_merge_text_and_image(model, inputs)
         embeds.append(inputs_embeds[:, :num_img_tokens, :])
     embeds = torch.cat(embeds)
+    assert embeds.shape == (
+        n_vqa_samples,
+        num_img_tokens,
+        model.config.projection_dim,  # 2304
+    )
     return embeds.std().item()
 
 
@@ -500,10 +503,29 @@ class ActivationPatchingResult:
             self.metadata["healthy_run_healthy_tok_logit"]
             - self.metadata["healthy_run_unhealthy_tok_logit"]
         )
-        normalized = (patched_logit_diff - unhealthy_logit_diff) / (
-            healthy_logit_diff - unhealthy_logit_diff
-        )
+        denominator = healthy_logit_diff - unhealthy_logit_diff
+        if denominator == 0.0:
+            raise ZeroDivisionError(
+                "Denominator is 0. Healthy and unhealthy logit diffs are same"
+            )
+
+        normalized = (patched_logit_diff - unhealthy_logit_diff) / denominator
         return normalized
+
+    def get_logit_diff_gn(self) -> torch.Tensor:
+        nomin = (
+            self.healthy_tok_response_logits
+            - self.metadata["unhealthy_run_healthy_tok_logit"]
+        )
+        denom = (
+            self.metadata["healthy_run_healthy_tok_logit"]
+            - self.metadata["unhealthy_run_healthy_tok_logit"]
+        )
+        if denom == 0.0:
+            raise ZeroDivisionError(
+                "Denominator is 0. Healthy and unhealthy logit diffs are same"
+            )
+        return nomin / denom
 
     def save(
         self,
@@ -916,7 +938,12 @@ def compute_mult_attn_sums_over_vqa(
 
 
 def compute_mult_attn_sums_over_noisy_vqa(
-    model, processor, n_vqa_samples: int, layers: list[int], n_img_tokens: int
+    model,
+    processor,
+    n_vqa_samples: int,
+    layers: list[int],
+    n_img_tokens: int,
+    std: float,
 ):
     stacked_attens = []
     for row in unique_vqa_imgs(n_vqa_samples=n_vqa_samples):
@@ -928,7 +955,9 @@ def compute_mult_attn_sums_over_noisy_vqa(
         ).to(model.device)
 
         inputs_embeds = paligemma_merge_text_and_image(model, inputs)
-        gn_inputs_embeds = gaussian_noising(inputs_embeds, num_img_tokens=n_img_tokens)
+        gn_inputs_embeds = gaussian_noising(
+            inputs_embeds, num_img_tokens=n_img_tokens, std=std
+        )
         mult_attn_sums = compute_mult_attn_sums(
             model,
             {"inputs_embeds": gn_inputs_embeds},
@@ -1123,6 +1152,7 @@ def guassian_noising_activation_patching(
     healthy_tok_str: str,
     tgt_directory: Path | str,
     n_img_tokens: int,
+    gaussian_noise_std: float,
     healthy_img: Image.Image | None = None,
 ):
     if healthy_img is None:
@@ -1134,7 +1164,11 @@ def guassian_noising_activation_patching(
     healthy_embeds = paligemma_merge_text_and_image(model, healthy_inputs)
     healthy_activation, _ = get_decoder_layer_outputs(model, healthy_embeds)
 
-    unhealthy_embeds = gaussian_noising(healthy_embeds, num_img_tokens=n_img_tokens)
+    unhealthy_embeds = gaussian_noising(
+        healthy_embeds,
+        num_img_tokens=n_img_tokens,
+        std=gaussian_noise_std,
+    )
 
     healthy_tok_idx = processor.tokenizer.encode(healthy_tok_str)
     unhealthy_tok_idx = healthy_tok_idx
