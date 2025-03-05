@@ -24,8 +24,8 @@ from transformers import (
     BatchFeature,
     PaliGemmaProcessor,
 )
-from tqdm import trange
 import plotly.graph_objects as go
+import pandas as pd
 
 
 @dataclass
@@ -834,7 +834,10 @@ def aggregate_layer_norms(
     return max_norms, avg_norms
 
 
-def unique_vqa_imgs(n_vqa_samples: int) -> Iterable[dict[str, Any]]:
+VQARow = dict[str, Any]
+
+
+def unique_vqa_imgs(n_vqa_samples: int) -> Iterable[VQARow]:
     ds = load_vqa_ds(split="train")
     seen_imgs = set()
     progress_bar = tqdm(total=n_vqa_samples)
@@ -850,6 +853,37 @@ def unique_vqa_imgs(n_vqa_samples: int) -> Iterable[dict[str, Any]]:
             return
 
     progress_bar.close()
+
+
+def get_vqa_balanced_pairs(n_vqa_samples: int) -> Iterable[tuple[VQARow, VQARow]]:
+    dataset = load_vqa_ds(split="train")
+
+    file = (
+        Path(__file__).parent
+        / "vqa_dataset/v2_mscoco_train2014_complementary_pairs.json"
+    )
+    with open(file, "r") as f:
+        pairs = json.load(f)
+
+    qids = pd.Series(dataset["question_id"])
+    n_yielded = 0
+    for pair in pairs:
+        indices = [idx for qid in pair for idx in qids[qids == qid].index]
+        assert len(indices) == 2
+
+        rows = dataset.select(indices)
+        row1 = rows[0]
+        row2 = rows[1]
+
+        if row1["multiple_choice_answer"] == row2["multiple_choice_answer"]:
+            print(f"Skipping pair {pair} because the answers are the same")
+            continue
+
+        yield row1, row2
+        n_yielded += 1
+
+        if n_yielded >= n_vqa_samples:
+            return
 
 
 def compute_mult_attn_sums_over_vqa(
