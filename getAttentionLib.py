@@ -653,9 +653,8 @@ def plot_pooled_probs_plt(
     cmap="Blues",
     ax=None,
     show_ylabel=True,
-    figsize=(8, 6),
+    figsize=(6, 3),
     fraction=0.03,
-    aspect=1.5
 ):
     if cmax is None:
         cmax = pooled_probs.max().item()
@@ -675,7 +674,7 @@ def plot_pooled_probs_plt(
         ticks=range(len(pooled_probs.T)),
         labels=["img_tokens"] + inputs_tokens[n_img_tokens:],
     )
-    cbar = plt.colorbar(im, ax=ax, fraction=fraction, aspect=aspect)
+    cbar = plt.colorbar(im, ax=ax, fraction=fraction)
     cbar.set_label(cbar_label)
     cbar.mappable.set_clim(cmin, cmax)
     plt.tight_layout()
@@ -925,8 +924,8 @@ def plot_img_and_text_probs_side_by_side(
     cmax=None,
     is_probabilities: bool = True,
 ):
-    frisbee2_pooled_purple_probs = maxpool_img_tokens(probs, n_img_tokens=n_img_tokens)
-    frisbee2_avg_img_probs = probs[:, :n_img_tokens].max(dim=0)[0].reshape(16, 16)
+    pooled_probs = maxpool_img_tokens(probs, n_img_tokens=n_img_tokens)
+    avg_img_probs = probs[:, :n_img_tokens].max(dim=0)[0].reshape(16, 16)
 
     # Create a side-by-side plot with img probs on the left and pooled probs on the right
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
@@ -945,7 +944,7 @@ def plot_img_and_text_probs_side_by_side(
         cmap = "RdBu"
 
     plot_img_probs(
-        probs=frisbee2_avg_img_probs,
+        probs=avg_img_probs,
         title=title,
         # img=np.array(image),
         ax=ax1,
@@ -962,7 +961,7 @@ def plot_img_and_text_probs_side_by_side(
     else:
         cbar_label = "Logit Diff"
     plot_pooled_probs_plt(
-        frisbee2_pooled_purple_probs,
+        pooled_probs,
         token_strings,
         cbar_label=cbar_label,
         ax=ax2,
@@ -1100,3 +1099,51 @@ def cluster_logits_diffs(logits_diffs: torch.Tensor, n_img_tokens: int) -> torch
     final_token = logits_diffs[:, -1]
     out = torch.stack([img_tokens, bos_tokens, text_tokens, final_token])
     return out  # shape (4, n_layers)
+
+
+def square_img(img: Image.Image) -> np.ndarray:
+    return np.array(img.resize((224, 224)))
+
+
+def plot_squared_imgs(healthy_img: Image.Image, unhealthy_img: Image.Image):
+    fig, axes = plt.subplots(1, 2, figsize=(5, 3))
+    fig.subplots_adjust(wspace=0)
+    axes[0].imshow(square_img(healthy_img))
+    axes[0].set_title("Healthy Image")
+    axes[0].axis("off")
+    axes[1].imshow(square_img(unhealthy_img))
+    axes[1].set_title("Unhealthy Image")
+    axes[1].axis("off")
+    fig.tight_layout()
+    return fig
+
+
+def dump_activation_patching_for_sample(
+    pr: ActivationPatchingResult,
+    dataset: dict[str, Any],
+    n_img_tokens: int,
+    tgt_dir: Path | str,
+):
+    """dataset maps image_id to row of VQA dataset"""
+
+    tgt_dir = Path(tgt_dir)
+    tgt_dir.mkdir(parents=True, exist_ok=True)
+
+    hvqa_row = dataset[pr.metadata["healthy_img_alias"]]
+    uvqa_row = dataset[pr.metadata["corruption_img_alias"]]
+    fig1 = plot_squared_imgs(hvqa_row["image"], uvqa_row["image"])
+    fig1.tight_layout(pad=0.5)
+    fig1.savefig(tgt_dir / "healthy_and_unhealthy_imgs.png")
+
+    pooled = maxpool_img_tokens(pr.get_logit_diff(), n_img_tokens=n_img_tokens)
+    fig2 = plot_pooled_probs_plt(
+        pooled_probs=pooled,
+        inputs_tokens=pr.metadata["token_strings"],
+        cbar_label="Logit Diff",
+        n_img_tokens=n_img_tokens,
+        cmap="RdBu",
+        cmax=(cmax := pooled.abs().max()),
+        cmin=-cmax,
+    )
+    fig2.tight_layout(pad=0.5)
+    fig2.savefig(tgt_dir / "pooled_probs.png")
