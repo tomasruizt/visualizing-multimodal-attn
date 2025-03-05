@@ -419,13 +419,11 @@ def compute_img_tokens_embeddings_std(
     embeds = []
     for row in unique_vqa_imgs(n_vqa_samples=n_vqa_samples):
         text = f"<image>Answer en {row['question']}"
-        try:
-            inputs = processor(text=text, images=row["image"], return_tensors="pt").to(
-                model.device
-            )
-        except ValueError as e:  # Unsupported number of image dimensions: 2
-            print(e)
-            continue
+        inputs = processor(
+            text=text,
+            images=row["image"].convert("RGB"),
+            return_tensors="pt",
+        ).to(model.device)
         inputs_embeds = paligemma_merge_text_and_image(model, inputs)
         embeds.append(inputs_embeds[:, :num_img_tokens, :])
     embeds = torch.cat(embeds)
@@ -877,7 +875,7 @@ def get_vqa_balanced_pairs(n_vqa_samples: int) -> Iterable[tuple[VQARow, VQARow]
         row2 = rows[1]
 
         if row1["multiple_choice_answer"] == row2["multiple_choice_answer"]:
-            print(f"Skipping pair {pair} because the answers are the same")
+            print(f"Skipping pair {pair} because the dataset answers are the same")
             continue
 
         yield row1, row2
@@ -893,23 +891,16 @@ def compute_mult_attn_sums_over_vqa(
     attens_tensor = []
     responses = []
     imgs = []
-    n_fails = 0
 
     for row in unique_vqa_imgs(n_vqa_samples):
         text = f"<image>Answer en {row['question']}"
-        try:
-            inputs = processor(text=text, images=row["image"], return_tensors="pt").to(
-                model.device
-            )
-        except ValueError as e:  # Unsupported number of image dimensions: 2
-            print(e)
-            n_fails += 1
-            continue
+        img = row["image"].convert("RGB")
+        inputs = processor(text=text, images=img, return_tensors="pt").to(model.device)
 
-        response = get_response(model, processor, text, row["image"])[1]
+        response = get_response(model, processor, text, img)[1]
         responses.append(response)
 
-        imgs.append(row["image"])
+        imgs.append(img)
 
         mult_attn_sums = compute_mult_attn_sums(
             model, inputs, layers=layers, n_img_tokens=n_img_tokens
@@ -920,7 +911,7 @@ def compute_mult_attn_sums_over_vqa(
             break
 
     stacked_attens = torch.stack(attens_tensor)
-    assert stacked_attens.shape == (n_vqa_samples - n_fails, len(layers), 4, 4)
+    assert stacked_attens.shape == (n_vqa_samples, len(layers), 4, 4)
     return stacked_attens, imgs, responses
 
 
@@ -930,13 +921,11 @@ def compute_mult_attn_sums_over_noisy_vqa(
     stacked_attens = []
     for row in unique_vqa_imgs(n_vqa_samples=n_vqa_samples):
         text = f"<image>Answer en {row['question']}"
-        try:
-            inputs = processor(text=text, images=row["image"], return_tensors="pt").to(
-                model.device
-            )
-        except ValueError as e:  # Unsupported number of image dimensions: 2
-            print(e)
-            continue
+        inputs = processor(
+            text=text,
+            images=row["image"].convert("RGB"),
+            return_tensors="pt",
+        ).to(model.device)
 
         inputs_embeds = paligemma_merge_text_and_image(model, inputs)
         gn_inputs_embeds = gaussian_noising(inputs_embeds, num_img_tokens=n_img_tokens)
@@ -1088,7 +1077,7 @@ def image_symmetric_token_replacement(
 
     if healthy_tok_idx == unhealthy_tok_idx:
         print(
-            "Skipping activation patching because the healthy and unhealthy tokens are the same"
+            "Skipping activation patching because the healthy and unhealthy response tokens are the same"
         )
         return
 
@@ -1147,7 +1136,7 @@ def plot_squared_imgs(healthy_img: Image.Image, unhealthy_img: Image.Image):
     axes[0].set_title("Healthy Image")
     axes[0].axis("off")
     axes[1].imshow(square_img(unhealthy_img))
-    axes[1].set_title("Unhealthy Image")
+    axes[1].set_title("Corrupted Image")
     axes[1].axis("off")
     fig.tight_layout()
     return fig
@@ -1166,7 +1155,9 @@ def dump_activation_patching_for_sample(
 
     hvqa_row = dataset[pr.metadata["healthy_img_alias"]]
     uvqa_row = dataset[pr.metadata["corruption_img_alias"]]
-    fig1 = plot_squared_imgs(hvqa_row["image"], uvqa_row["image"])
+    fig1 = plot_squared_imgs(
+        hvqa_row["image"].convert("RGB"), uvqa_row["image"].convert("RGB")
+    )
     fig1.tight_layout(pad=0.5)
     fig1.savefig(tgt_dir / "healthy_and_unhealthy_imgs.png")
 
