@@ -126,7 +126,7 @@ def get_response(
 ) -> tuple[list[str], str]:
     inputs = processor(text=text, images=image, return_tensors="pt").to(model.device)
     inputs_tokens = [processor.decode(id) for id in inputs.input_ids[0]]
-    outputs = model.generate(**inputs, max_new_tokens=max_new_tokens)
+    outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
     response: str = processor.tokenizer.decode(outputs[0], skip_special_tokens=True)
     return inputs_tokens, response
 
@@ -490,6 +490,23 @@ class ActivationPatchingResult:
     unhealthy_tok_response_logits: torch.Tensor
     metadata: dict[str, Any] | None = None
 
+    def get_logit_diff(self) -> torch.Tensor:
+        unhealthy_logit_diff = (
+            self.metadata["unhealthy_run_healthy_tok_logit"]
+            - self.metadata["unhealthy_run_unhealthy_tok_logit"]
+        )
+        patched_logit_diff = (
+            self.healthy_tok_response_logits - self.unhealthy_tok_response_logits
+        )
+        healthy_logit_diff = (
+            self.metadata["healthy_run_healthy_tok_logit"]
+            - self.metadata["healthy_run_unhealthy_tok_logit"]
+        )
+        normalized = (patched_logit_diff - unhealthy_logit_diff) / (
+            healthy_logit_diff - unhealthy_logit_diff
+        )
+        return normalized
+
     def save(
         self,
         directory: Path | str,
@@ -502,6 +519,8 @@ class ActivationPatchingResult:
         unhealthy_run_unhealthy_tok_logit: float,
         unhealthy_run_healthy_tok_logit: float,
         corruption_img_alias: str | None = None,
+        healthy_run_unhealthy_tok_logit: float | None = None,
+        healthy_run_healthy_tok_logit: float | None = None,
     ):
         directory = Path(directory)
         directory.mkdir(parents=True, exist_ok=True)
@@ -516,6 +535,8 @@ class ActivationPatchingResult:
             "unhealthy_run_unhealthy_tok_logit": unhealthy_run_unhealthy_tok_logit,
             "unhealthy_run_healthy_tok_logit": unhealthy_run_healthy_tok_logit,
             "token_strings": token_strings,
+            "healthy_run_unhealthy_tok_logit": healthy_run_unhealthy_tok_logit,
+            "healthy_run_healthy_tok_logit": healthy_run_healthy_tok_logit,
         }
         metadata_path = directory / "metadata.json"
         metadata_path.write_text(json.dumps(metadata, indent=2))
@@ -625,18 +646,20 @@ def plot_pooled_probs_plotly(
 def plot_pooled_probs_plt(
     pooled_probs: torch.Tensor,
     inputs_tokens: list[str],
-    healthy_response_tok_name: str,
+    cbar_label: str,
+    n_img_tokens: int,
     cmax=None,
     cmin=None,
     cmap="Blues",
     ax=None,
     show_ylabel=True,
+    figsize=(8, 6),
 ):
     if cmax is None:
         cmax = pooled_probs.max().item()
 
     if ax is None:
-        _, ax = plt.subplots()
+        _, ax = plt.subplots(figsize=figsize)
 
     im = ax.imshow(pooled_probs.T, cmap=cmap)
     if show_ylabel:
@@ -644,10 +667,10 @@ def plot_pooled_probs_plt(
     ax.set_xlabel("layer")
     ax.set_yticks(
         ticks=range(len(pooled_probs.T)),
-        labels=["img_tokens"] + inputs_tokens[256:],
+        labels=["img_tokens"] + inputs_tokens[n_img_tokens:],
     )
-    cbar = plt.colorbar(im, ax=ax)
-    cbar.set_label(f"Prob ({healthy_response_tok_name})")
+    cbar = plt.colorbar(im, ax=ax, fraction=0.03)
+    cbar.set_label(cbar_label)
     cbar.mappable.set_clim(cmin, cmax)
     plt.tight_layout()
     return ax.figure
@@ -928,15 +951,20 @@ def plot_img_and_text_probs_side_by_side(
 
     # Right plot: pooled probabilities
     plt.sca(ax2)
+    if is_probabilities:
+        cbar_label = f"Prob ({token_str})"
+    else:
+        cbar_label = "Logit Diff"
     plot_pooled_probs_plt(
         frisbee2_pooled_purple_probs,
         token_strings,
-        healthy_response_tok_name=token_str,
+        cbar_label=cbar_label,
         ax=ax2,
         show_ylabel=False,
         cmax=cmax,
         cmin=cmin,
         cmap=cmap,
+        n_img_tokens=n_img_tokens,
     )
     # No need to close pooled_fig since we're directly plotting to ax2
 
@@ -1018,6 +1046,12 @@ def image_symmetric_token_replacement(
     ).to(model.device)
     unhealthy_embeds = paligemma_merge_text_and_image(model, unhealthy_inputs)
 
+    if healthy_tok_idx == unhealthy_tok_idx:
+        print(
+            "Skipping activation patching because the healthy and unhealthy tokens are the same"
+        )
+        return
+
     patching_result: ActivationPatchingResult = patch_all_activations(
         model=model,
         healthy_activations=healthy_activations,
@@ -1028,6 +1062,9 @@ def image_symmetric_token_replacement(
 
     unhealthy_outputs = model(**unhealthy_inputs)
     unhealthy_logits = unhealthy_outputs.logits[0, -1, :]
+
+    healthy_outputs = model(**healthy_inputs)
+    healthy_logits = healthy_outputs.logits[0, -1, :]
 
     token_strings = processor.tokenizer.convert_ids_to_tokens(
         healthy_inputs.input_ids[0]
@@ -1044,4 +1081,16 @@ def image_symmetric_token_replacement(
         token_strings=token_strings,
         unhealthy_run_unhealthy_tok_logit=unhealthy_logits[unhealthy_tok_idx].item(),
         unhealthy_run_healthy_tok_logit=unhealthy_logits[healthy_tok_idx].item(),
+        healthy_run_unhealthy_tok_logit=healthy_logits[unhealthy_tok_idx].item(),
+        healthy_run_healthy_tok_logit=healthy_logits[healthy_tok_idx].item(),
     )
+
+
+def cluster_logits_diffs(logits_diffs: torch.Tensor, n_img_tokens: int) -> torch.Tensor:
+    """Logits diffs is a tensor of shape (n_layers, n_tokens)"""
+    img_tokens = logits_diffs[:, :n_img_tokens].max(dim=1)[0]
+    bos_tokens = logits_diffs[:, n_img_tokens]
+    text_tokens = logits_diffs[:, n_img_tokens + 1 : -1].max(dim=1)[0]
+    final_token = logits_diffs[:, -1]
+    out = torch.stack([img_tokens, bos_tokens, text_tokens, final_token])
+    return out  # shape (4, n_layers)
