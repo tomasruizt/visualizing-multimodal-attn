@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 import datetime
 import json
+import os
 from pathlib import Path
 from PIL import Image
 import PIL.Image
@@ -491,7 +492,8 @@ class ActivationPatchingResult:
     unhealthy_tok_response_logits: torch.Tensor
     metadata: dict[str, Any] | None = None
 
-    def get_logit_diff(self) -> torch.Tensor:
+    def get_logit_diff_str(self) -> torch.Tensor:
+        """logit diffs for symmetric token replacement"""
         unhealthy_logit_diff = (
             self.metadata["unhealthy_run_healthy_tok_logit"]
             - self.metadata["unhealthy_run_unhealthy_tok_logit"]
@@ -513,6 +515,7 @@ class ActivationPatchingResult:
         return normalized
 
     def get_logit_diff_gn(self) -> torch.Tensor:
+        """logit diffs for gaussian noising"""
         nomin = (
             self.healthy_tok_response_logits
             - self.metadata["unhealthy_run_healthy_tok_logit"]
@@ -795,6 +798,18 @@ def avgpool_img_tokens(probs: torch.Tensor) -> torch.Tensor:
     return pooled
 
 
+def maxabspool_img_tokens(probs: torch.Tensor, n_img_tokens: int) -> torch.Tensor:
+    imgs_max_pool = maxabs_reduction(probs[:, :n_img_tokens], dim=1)[:, None]
+    pooled = torch.hstack([imgs_max_pool, probs[:, n_img_tokens:]])
+    return pooled
+
+
+def maxabs_reduction(xs: torch.Tensor, dim: int) -> torch.Tensor:
+    """Returns the max abs values in dim, regardless of sign"""
+    _, idxs = xs.abs().max(dim=dim, keepdim=True)
+    return xs.gather(dim=dim, index=idxs).squeeze(dim=dim)
+
+
 def plot_fx_norms_progressions(
     max_norms: torch.Tensor, avg_norms: torch.Tensor, sharey=False
 ):
@@ -976,9 +991,16 @@ def plot_img_and_text_probs_side_by_side(
     token_str: str,
     cmax=None,
     is_probabilities: bool = True,
+    reduction: str = "mean",  # or "absmax"
 ):
-    pooled_probs = maxpool_img_tokens(probs, n_img_tokens=n_img_tokens)
-    avg_img_probs = probs[:, :n_img_tokens].max(dim=0)[0].reshape(16, 16)
+    if reduction == "absmax":
+        pooled_probs = maxabspool_img_tokens(probs, n_img_tokens=n_img_tokens)
+        probs_by_img = maxabs_reduction(probs[:, :n_img_tokens], dim=0).reshape(16, 16)
+    elif reduction == "mean":
+        pooled_probs = avgpool_img_tokens(probs)
+        probs_by_img = probs[:, :n_img_tokens].mean(dim=0).reshape(16, 16)
+    else:
+        raise ValueError(f"Invalid reduction: {reduction}")
 
     # Create a side-by-side plot with img probs on the left and pooled probs on the right
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
@@ -997,7 +1019,7 @@ def plot_img_and_text_probs_side_by_side(
         cmap = "RdBu"
 
     plot_img_probs(
-        probs=avg_img_probs,
+        probs=probs_by_img,
         title=title,
         # img=np.array(image),
         ax=ax1,
@@ -1207,12 +1229,25 @@ def guassian_noising_activation_patching(
     )
 
 
-def cluster_logits_diffs(logits_diffs: torch.Tensor, n_img_tokens: int) -> torch.Tensor:
+def group_logits_diffs(
+    logits_diffs: torch.Tensor, n_img_tokens: int, reduction: str
+) -> torch.Tensor:
     """Logits diffs is a tensor of shape (n_layers, n_tokens)"""
-    img_tokens = logits_diffs[:, :n_img_tokens].max(dim=1)[0]
+    if reduction == "absmax":
+        img_tokens = maxabs_reduction(logits_diffs[:, :n_img_tokens], dim=1)
+        text_tokens = maxabs_reduction(logits_diffs[:, n_img_tokens + 1 : -1], dim=1)
+    elif reduction == "mean":
+        img_tokens = logits_diffs[:, :n_img_tokens].mean(dim=1)
+        text_tokens = logits_diffs[:, n_img_tokens + 1 : -1].mean(dim=1)
+    elif reduction == "max":
+        img_tokens = logits_diffs[:, :n_img_tokens].max(dim=1)[0]
+        text_tokens = logits_diffs[:, n_img_tokens + 1 : -1].max(dim=1)[0]
+    else:
+        raise ValueError(f"Invalid reduction: {reduction}")
+
     bos_tokens = logits_diffs[:, n_img_tokens]
-    text_tokens = logits_diffs[:, n_img_tokens + 1 : -1].max(dim=1)[0]
     final_token = logits_diffs[:, -1]
+
     out = torch.stack([img_tokens, bos_tokens, text_tokens, final_token])
     return out  # shape (4, n_layers)
 
@@ -1253,7 +1288,7 @@ def dump_activation_patching_for_sample(
     fig1.tight_layout(pad=0.5)
     fig1.savefig(tgt_dir / "healthy_and_unhealthy_imgs.png")
 
-    pooled = maxpool_img_tokens(pr.get_logit_diff(), n_img_tokens=n_img_tokens)
+    pooled = maxpool_img_tokens(pr.get_logit_diff_str(), n_img_tokens=n_img_tokens)
     fig2 = plot_pooled_probs_plt(
         pooled_probs=pooled,
         inputs_tokens=pr.metadata["token_strings"],
@@ -1265,3 +1300,24 @@ def dump_activation_patching_for_sample(
     )
     fig2.tight_layout(pad=0.5)
     fig2.savefig(tgt_dir / "pooled_probs.png")
+
+
+def load_and_group_logit_diffs(
+    root: str | Path, is_gaussian_noising: bool, n_img_tokens: int, reduction: str
+):
+    root = Path(root)
+    grouped_logit_diffs = []
+    for p in [root / p for p in os.listdir(root)]:
+        pr = ActivationPatchingResult.load(p)
+        try:
+            if is_gaussian_noising:
+                ld = pr.get_logit_diff_gn()
+            else:
+                ld = pr.get_logit_diff_str()
+            cld = group_logits_diffs(ld, n_img_tokens=n_img_tokens, reduction=reduction)
+            grouped_logit_diffs.append(cld)
+        except ZeroDivisionError:
+            print(f"Skipping {p} because denominator is 0")
+            continue
+    grouped_logit_diffs = torch.stack(grouped_logit_diffs)
+    return grouped_logit_diffs
