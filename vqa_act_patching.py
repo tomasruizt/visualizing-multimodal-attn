@@ -17,7 +17,7 @@ assert shortname in ["gn", "str"]
 
 xs_std = 3 * 0.0045  # from compute_img_tokens_embeddings_std(n_vqa_samples=100)
 s_std = 10 * xs_std
-gn_std = xs_std
+gn_std = s_std
 
 if __name__ == "__main__":
     model, processor = load_pg2_model_and_processor(compile=True)
