@@ -505,7 +505,7 @@ class ActivationPatchingResult:
             self.metadata["healthy_run_healthy_tok_logit"]
             - self.metadata["healthy_run_unhealthy_tok_logit"]
         )
-        denominator = healthy_logit_diff - unhealthy_logit_diff
+        denominator = abs(healthy_logit_diff - unhealthy_logit_diff)
         if denominator == 0.0:
             raise ZeroDivisionError(
                 "Denominator is 0. Healthy and unhealthy logit diffs are same"
@@ -520,7 +520,7 @@ class ActivationPatchingResult:
             self.healthy_tok_response_logits
             - self.metadata["unhealthy_run_healthy_tok_logit"]
         )
-        denom = (
+        denom = abs(
             self.metadata["healthy_run_healthy_tok_logit"]
             - self.metadata["unhealthy_run_healthy_tok_logit"]
         )
@@ -992,6 +992,7 @@ def plot_img_and_text_probs_side_by_side(
     cmax=None,
     is_probabilities: bool = True,
     reduction: str = "mean",  # or "absmax"
+    cmin_cmax: tuple[float, float] | None = None,
 ):
     if reduction == "absmax":
         pooled_probs = maxabspool_img_tokens(probs, n_img_tokens=n_img_tokens)
@@ -1018,13 +1019,19 @@ def plot_img_and_text_probs_side_by_side(
         cmin = -cmax
         cmap = "RdBu"
 
+    if cmin_cmax is None:
+        cmax = cmax * 0.3 if not is_probabilities else cmax
+        cmin = cmin * 0.3 if not is_probabilities else cmin
+    else:
+        cmin, cmax = cmin_cmax
+
     plot_img_probs(
         probs=probs_by_img,
         title=title,
         # img=np.array(image),
         ax=ax1,
-        cmax=cmax * 0.3 if not is_probabilities else cmax,
-        cmin=cmin * 0.3 if not is_probabilities else cmin,
+        cmax=cmax,
+        cmin=cmin,
         cmap=cmap,
     )
     # plt.grid(True, which="minor")
@@ -1076,12 +1083,12 @@ def plot_metric_with_std_over_layers(metric, ylabel: str):
     return plt.gcf()
 
 
-def load_pg2_model_and_processor(compile=False):
-    torch.set_grad_enabled(False)  # avoid blowing up mem
+def load_pg2_model_and_processor(compile=False, torch_dtype=torch.bfloat16):
+    torch.set_grad_enabled(False)  # avoid blowing up memory
     model_id = "google/paligemma2-3b-pt-224"
     model = PaliGemmaForConditionalGeneration.from_pretrained(
         model_id,
-        torch_dtype=torch.bfloat16,
+        torch_dtype=torch_dtype,
         device_map="auto",
         attn_implementation="flash_attention_2",
     ).eval()

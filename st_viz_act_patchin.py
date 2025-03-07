@@ -85,6 +85,7 @@ kwargs = dict(
     token_strings=str_pr.metadata["token_strings"],
     token_str=str_pr.metadata["healthy_response_tok"],
     is_probabilities=False,
+    cmin_cmax=(-1, 1),
 )
 
 

@@ -7,6 +7,7 @@ vqa_dataset/
 
 # Macos
 .DS_Store/
+logs.txt
 
 # Generated files
 *.png
