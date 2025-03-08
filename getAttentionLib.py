@@ -520,15 +520,18 @@ class ActivationPatchingResult:
             self.healthy_tok_response_logits
             - self.metadata["unhealthy_run_healthy_tok_logit"]
         )
-        denom = abs(
-            self.metadata["healthy_run_healthy_tok_logit"]
-            - self.metadata["unhealthy_run_healthy_tok_logit"]
-        )
+        denom = abs(self.healthy_tok_logit_diff())
         if denom == 0.0:
             raise ZeroDivisionError(
                 "Denominator is 0. Healthy and unhealthy logit diffs are same"
             )
         return nomin / denom
+
+    def healthy_tok_logit_diff(self) -> float:
+        return (
+            self.metadata["healthy_run_healthy_tok_logit"]
+            - self.metadata["unhealthy_run_healthy_tok_logit"]
+        )
 
     def save(
         self,
@@ -1083,17 +1086,22 @@ def plot_metric_with_std_over_layers(metric, ylabel: str):
     return plt.gcf()
 
 
-def load_pg2_model_and_processor(compile=False, torch_dtype=torch.bfloat16):
+def load_pg2_model_and_processor(
+    compile=False, torch_dtype=torch.bfloat16, attn_implementation="flash_attention_2"
+):
     torch.set_grad_enabled(False)  # avoid blowing up memory
     model_id = "google/paligemma2-3b-pt-224"
-    model = PaliGemmaForConditionalGeneration.from_pretrained(
-        model_id,
-        torch_dtype=torch_dtype,
-        device_map="auto",
-        attn_implementation="flash_attention_2",
-    ).eval()
-    torch.set_float32_matmul_precision("high")
+    model = (
+        PaliGemmaForConditionalGeneration.from_pretrained(
+            model_id,
+            torch_dtype=torch_dtype,
+            attn_implementation=attn_implementation,
+        )
+        .to("cuda")
+        .eval()
+    )
     if compile:
+        torch.set_float32_matmul_precision("high")
         model = torch.compile(model)
     processor = PaliGemmaProcessor.from_pretrained(model_id)
     return model, processor
