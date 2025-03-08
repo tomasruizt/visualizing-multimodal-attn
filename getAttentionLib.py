@@ -280,7 +280,12 @@ def plot_mult_attn_sums(
 
 def load_vqa_ds(split: str | None = None):
     avoid_timeout = {"client_kwargs": {"timeout": aiohttp.ClientTimeout(total=3600)}}
-    ds = load_dataset("HuggingFaceM4/VQAv2", split=split, storage_options=avoid_timeout)
+    ds = load_dataset(
+        "HuggingFaceM4/VQAv2",
+        split=split,
+        storage_options=avoid_timeout,
+        trust_remote_code=True,
+    )
     return ds
 
 
