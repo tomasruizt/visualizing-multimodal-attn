@@ -780,12 +780,12 @@ def plot_img_probs(
         ax.set_yticks(np.linspace(0, img_height, h + 1)[:-1])
     else:
         im = ax.imshow(probs, cmap=cmap)
-        ax.set_xticks(range(w))
-        ax.set_yticks(range(h))
+        ax.set_xticks(range(0, w, 2))
+        ax.set_yticks(range(0, h, 2))
 
     # Set tick labels (1 to h/w)
-    ax.set_xticklabels(range(1, w + 1))
-    ax.set_yticklabels(range(1, h + 1))
+    ax.set_xticklabels(range(1, w + 1, 2))
+    ax.set_yticklabels(range(1, h + 1, 2))
 
     # Add minor ticks for grid
     ax.set_xticks(np.arange(-0.5, w, 1), minor=True)
@@ -940,7 +940,12 @@ def get_vqa_balanced_pairs(n_vqa_samples: int) -> Iterable[tuple[VQARow, VQARow]
 
 
 def compute_mult_attn_sums_over_vqa(
-    model, processor, n_vqa_samples: int, layers: list[int], n_img_tokens: int
+    model,
+    processor,
+    n_vqa_samples: int,
+    layers: list[int],
+    n_img_tokens: int,
+    get_responses: bool = True,
 ) -> torch.Tensor:
     attens_tensor = []
     responses = []
@@ -951,8 +956,9 @@ def compute_mult_attn_sums_over_vqa(
         img = row["image"].convert("RGB")
         inputs = processor(text=text, images=img, return_tensors="pt").to(model.device)
 
-        response = get_response(model, processor, text, img)[1]
-        responses.append(response)
+        if get_responses:
+            response = get_response(model, processor, text, img)[1]
+            responses.append(response)
 
         imgs.append(img)
 
@@ -1017,11 +1023,14 @@ def plot_img_and_text_probs_side_by_side(
     elif reduction == "mean":
         pooled_probs = avgpool_img_tokens(probs)
         probs_by_img = probs[:, :n_img_tokens].mean(dim=0).reshape(16, 16)
+    elif reduction == "max":
+        pooled_probs = maxpool_img_tokens(probs, n_img_tokens=n_img_tokens)
+        probs_by_img = probs[:, :n_img_tokens].max(dim=0)[0].reshape(16, 16)
     else:
         raise ValueError(f"Invalid reduction: {reduction}")
 
     # Create a side-by-side plot with img probs on the left and pooled probs on the right
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(9, 3))
 
     # Left plot: image probabilities
     plt.sca(ax1)
@@ -1031,7 +1040,7 @@ def plot_img_and_text_probs_side_by_side(
         cmin = 0
         cmap = "Blues"
     else:
-        title = "Max Logit Diff over all layers"
+        title = "Agg Logit Diff over all layers"
         cmax = probs.abs().max()
         cmin = -cmax
         cmap = "RdBu"
@@ -1076,28 +1085,34 @@ def plot_img_and_text_probs_side_by_side(
     return fig
 
 
-def plot_metric_with_std_over_layers(metric, ylabel: str):
+def plot_metric_with_std_over_layers(
+    metric, ylabel: str, ax=None, label=None, marker="o"
+):
     """metric is a tensor of shape (n_examples, n_layers)"""
 
-    plt.figure(figsize=(4, 2.5))
-    plt.plot(metric.mean(dim=0), marker="o")
+    if ax is None:
+        fig = plt.figure(figsize=(4, 2.5))
+        ax = plt.gca()
+    else:
+        fig = ax.figure
+
+    ax.plot(metric.mean(dim=0), marker=marker, label=label, alpha=0.8)
     # Plot mean with standard deviation bands
     means = metric.mean(dim=0)
     stds = metric.std(dim=0)
     x = range(len(means))
 
-    plt.fill_between(
-        x, means - stds, means + stds, alpha=0.3, color="blue", label="±1 std"
-    )
-    plt.legend()
+    ax.fill_between(x, means - stds, means + stds, alpha=0.3)
+    ax.legend()
 
-    plt.ylabel(ylabel)
-    plt.xlabel("Layer")
-    plt.xticks(x[::2], range(1, len(x) + 1)[::2])
-    plt.grid()
+    ax.set_ylabel(ylabel)
+    ax.set_xlabel("Layer")
+    ax.set_xticks(x[::2])
+    ax.set_xticklabels(range(1, len(x) + 1)[::2])
+    ax.grid()
     plt.tight_layout()
 
-    return plt.gcf()
+    return fig
 
 
 def load_pg2_model_and_processor(
@@ -1271,6 +1286,9 @@ def group_logits_diffs(
     elif reduction == "max":
         img_tokens = logits_diffs[:, :n_img_tokens].max(dim=1)[0]
         text_tokens = logits_diffs[:, n_img_tokens + 1 : -1].max(dim=1)[0]
+    elif reduction == "absmean":
+        img_tokens = logits_diffs[:, :n_img_tokens].abs().mean(dim=1)
+        text_tokens = logits_diffs[:, n_img_tokens + 1 : -1].abs().mean(dim=1)
     else:
         raise ValueError(f"Invalid reduction: {reduction}")
 

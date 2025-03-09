@@ -172,28 +172,29 @@ with c1:
     st.write(fig)
 
 with c2:
-    st.write(f"### Reduction: absmax, Folder: {folder1}")
+    reduction2 = "max"
+    st.write(f"### Reduction: {reduction2}, Folder: {folder1}")
     fig = plot_img_and_text_probs_side_by_side(
-        logits_diff1, **kwargs, reduction="absmax"
+        logits_diff1, **kwargs, reduction=reduction2
     )
     st.write(fig)
-    st.write(f"### Reduction: absmax, Folder: {folder2}")
+    st.write(f"### Reduction: {reduction2}, Folder: {folder2}")
     fig = plot_img_and_text_probs_side_by_side(
-        logits_diff2, **kwargs, reduction="absmax"
+        logits_diff2, **kwargs, reduction=reduction2
     )
     st.write(fig)
-    st.write(f"### Reduction: absmax, Folder: {folder3}")
+    st.write(f"### Reduction: {reduction2}, Folder: {folder3}")
     fig = plot_img_and_text_probs_side_by_side(
-        logits_diff3, **kwargs, reduction="absmax"
+        logits_diff3, **kwargs, reduction=reduction2
     )
     st.write(fig)
-    st.write(f"### Reduction: absmax, Folder: {folder4}")
+    st.write(f"### Reduction: {reduction2}, Folder: {folder4}")
     fig = plot_img_and_text_probs_side_by_side(
-        logits_diff4, **kwargs, reduction="absmax"
+        logits_diff4, **kwargs, reduction=reduction2
     )
     st.write(fig)
-    st.write(f"### Reduction: absmax, Folder: {folder5}")
+    st.write(f"### Reduction: {reduction2}, Folder: {folder5}")
     fig = plot_img_and_text_probs_side_by_side(
-        logits_diff5, **kwargs, reduction="absmax"
+        logits_diff5, **kwargs, reduction=reduction2
     )
     st.write(fig)
