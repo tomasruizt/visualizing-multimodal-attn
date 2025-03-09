@@ -12,12 +12,12 @@ from getAttentionLib import (
 
 
 # either "gn" for gaussian noising or "str" for symmetric token replacement
-shortname: str = "gn"
-assert shortname in ["gn", "str"]
+shortname: str = "gn_20o"
+assert shortname == "str" or "gn" in shortname
 
 sigma = 0.0045
 # xs_std = 3 * sigma  # from compute_img_tokens_embeddings_std(n_vqa_samples=100) = 10 * xs_std
-gn_std = 10 * sigma
+gn_std = 20 * sigma
 
 if __name__ == "__main__":
     model, processor = load_pg2_model_and_processor(compile=True)
@@ -68,7 +68,7 @@ if __name__ == "__main__":
                 unhealthy_tok_str=unhealthy_tok_str,
                 tgt_directory=tgt_dir,
             )
-        elif shortname == "gn":
+        elif "gn" in shortname:
             guassian_noising_activation_patching(
                 model=model,
                 processor=processor,

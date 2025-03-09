@@ -506,11 +506,7 @@ class ActivationPatchingResult:
         patched_logit_diff = (
             self.healthy_tok_response_logits - self.unhealthy_tok_response_logits
         )
-        healthy_logit_diff = (
-            self.metadata["healthy_run_healthy_tok_logit"]
-            - self.metadata["healthy_run_unhealthy_tok_logit"]
-        )
-        denominator = abs(healthy_logit_diff - unhealthy_logit_diff)
+        denominator = abs(self.logit_diff_denominator_str())
         if denominator == 0.0:
             raise ZeroDivisionError(
                 "Denominator is 0. Healthy and unhealthy logit diffs are same"
@@ -519,20 +515,33 @@ class ActivationPatchingResult:
         normalized = (patched_logit_diff - unhealthy_logit_diff) / denominator
         return normalized
 
+    def logit_diff_denominator_str(self) -> float:
+        """without abs()"""
+        unhealthy_logit_diff = (
+            self.metadata["unhealthy_run_healthy_tok_logit"]
+            - self.metadata["unhealthy_run_unhealthy_tok_logit"]
+        )
+        healthy_logit_diff = (
+            self.metadata["healthy_run_healthy_tok_logit"]
+            - self.metadata["healthy_run_unhealthy_tok_logit"]
+        )
+        return healthy_logit_diff - unhealthy_logit_diff
+
     def get_logit_diff_gn(self) -> torch.Tensor:
         """logit diffs for gaussian noising"""
         nomin = (
             self.healthy_tok_response_logits
             - self.metadata["unhealthy_run_healthy_tok_logit"]
         )
-        denom = abs(self.healthy_tok_logit_diff())
+        denom = abs(self.logit_diff_denominator_gn())
         if denom == 0.0:
             raise ZeroDivisionError(
                 "Denominator is 0. Healthy and unhealthy logit diffs are same"
             )
         return nomin / denom
 
-    def healthy_tok_logit_diff(self) -> float:
+    def logit_diff_denominator_gn(self) -> float:
+        """without abs()"""
         return (
             self.metadata["healthy_run_healthy_tok_logit"]
             - self.metadata["unhealthy_run_healthy_tok_logit"]
