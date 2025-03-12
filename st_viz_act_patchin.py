@@ -96,7 +96,14 @@ if pr1.metadata["corruption_img_alias"] is not None:
     fig = plot_squared_imgs(
         Image.open(hvqa_row["image"]["path"]).convert("RGB"),
         Image.open(uvqa_row["image"]["path"]).convert("RGB"),
+        title1=f"A: {uvqa_row['multiple_choice_answer']}",
+        title2=f"A: {hvqa_row['multiple_choice_answer']}",
     )
+    fig.suptitle(f"Question: {hvqa_row['question']}")
+    fig.tight_layout()
+    tgt_dir = Path("imgs/st_app/") / case
+    tgt_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(tgt_dir / "img_pair.pdf", dpi=300)
     with c2:
         st.pyplot(fig)
 else:
@@ -158,18 +165,18 @@ with c1:
     st.write(f"### Reduction: mean, Folder: {folder1}")
     fig = plot_img_and_text_probs_side_by_side(logits_diff1, reduction="mean", **kwargs)
     st.write(fig)
-    st.write(f"### Reduction: mean, Folder: {folder2}")
-    fig = plot_img_and_text_probs_side_by_side(logits_diff2, reduction="mean", **kwargs)
-    st.write(fig)
-    st.write(f"### Reduction: mean, Folder: {folder3}")
-    fig = plot_img_and_text_probs_side_by_side(logits_diff3, reduction="mean", **kwargs)
-    st.write(fig)
-    st.write(f"### Reduction: mean, Folder: {folder4}")
-    fig = plot_img_and_text_probs_side_by_side(logits_diff4, reduction="mean", **kwargs)
-    st.write(fig)
-    st.write(f"### Reduction: mean, Folder: {folder5}")
-    fig = plot_img_and_text_probs_side_by_side(logits_diff5, reduction="mean", **kwargs)
-    st.write(fig)
+    # st.write(f"### Reduction: mean, Folder: {folder2}")
+    # fig = plot_img_and_text_probs_side_by_side(logits_diff2, reduction="mean", **kwargs)
+    # st.write(fig)
+    # st.write(f"### Reduction: mean, Folder: {folder3}")
+    # fig = plot_img_and_text_probs_side_by_side(logits_diff3, reduction="mean", **kwargs)
+    # st.write(fig)
+    # st.write(f"### Reduction: mean, Folder: {folder4}")
+    # fig = plot_img_and_text_probs_side_by_side(logits_diff4, reduction="mean", **kwargs)
+    # st.write(fig)
+    # st.write(f"### Reduction: mean, Folder: {folder5}")
+    # fig = plot_img_and_text_probs_side_by_side(logits_diff5, reduction="mean", **kwargs)
+    # st.write(fig)
 
 with c2:
     reduction2 = "max"
@@ -178,23 +185,24 @@ with c2:
         logits_diff1, **kwargs, reduction=reduction2
     )
     st.write(fig)
-    st.write(f"### Reduction: {reduction2}, Folder: {folder2}")
-    fig = plot_img_and_text_probs_side_by_side(
-        logits_diff2, **kwargs, reduction=reduction2
-    )
-    st.write(fig)
-    st.write(f"### Reduction: {reduction2}, Folder: {folder3}")
-    fig = plot_img_and_text_probs_side_by_side(
-        logits_diff3, **kwargs, reduction=reduction2
-    )
-    st.write(fig)
-    st.write(f"### Reduction: {reduction2}, Folder: {folder4}")
-    fig = plot_img_and_text_probs_side_by_side(
-        logits_diff4, **kwargs, reduction=reduction2
-    )
-    st.write(fig)
-    st.write(f"### Reduction: {reduction2}, Folder: {folder5}")
-    fig = plot_img_and_text_probs_side_by_side(
-        logits_diff5, **kwargs, reduction=reduction2
-    )
-    st.write(fig)
+    fig.savefig(tgt_dir / f"{folder1}_{reduction2}_agg_logitdiffs.pdf", dpi=300)
+    # st.write(f"### Reduction: {reduction2}, Folder: {folder2}")
+    # fig = plot_img_and_text_probs_side_by_side(
+    #     logits_diff2, **kwargs, reduction=reduction2
+    # )
+    # st.write(fig)
+    # st.write(f"### Reduction: {reduction2}, Folder: {folder3}")
+    # fig = plot_img_and_text_probs_side_by_side(
+    #     logits_diff3, **kwargs, reduction=reduction2
+    # )
+    # st.write(fig)
+    # st.write(f"### Reduction: {reduction2}, Folder: {folder4}")
+    # fig = plot_img_and_text_probs_side_by_side(
+    #     logits_diff4, **kwargs, reduction=reduction2
+    # )
+    # st.write(fig)
+    # st.write(f"### Reduction: {reduction2}, Folder: {folder5}")
+    # fig = plot_img_and_text_probs_side_by_side(
+    #     logits_diff5, **kwargs, reduction=reduction2
+    # )
+    # st.write(fig)

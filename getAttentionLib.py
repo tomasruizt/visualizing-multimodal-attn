@@ -704,8 +704,8 @@ def plot_pooled_probs_plt(
 
     im = ax.imshow(pooled_probs.T, cmap=cmap)
     if show_ylabel:
-        ax.set_ylabel("token")
-    ax.set_xlabel("layer")
+        ax.set_ylabel("Token")
+    ax.set_xlabel("Layer")
     ax.set_xticks(
         ticks=range(len(pooled_probs))[::2],
         labels=list(range(1, len(pooled_probs) + 1))[::2],
@@ -799,8 +799,8 @@ def plot_img_probs(
     cbar.mappable.set_clim(cmin, cmax)
     ax.set_title(title)
 
-    ax.set_ylabel("image patch")
-    ax.set_xlabel("image patch")
+    ax.set_ylabel("Image patch")
+    ax.set_xlabel("Image patch")
 
 
 def maxpool_img_tokens(probs: torch.Tensor, n_img_tokens: int) -> torch.Tensor:
@@ -1040,7 +1040,7 @@ def plot_img_and_text_probs_side_by_side(
         cmin = 0
         cmap = "Blues"
     else:
-        title = "Agg Logit Diff over all layers"
+        title = "Agg LD over all layers"
         cmax = probs.abs().max()
         cmin = -cmax
         cmap = "RdBu"
@@ -1303,16 +1303,25 @@ def square_img(img: Image.Image) -> np.ndarray:
     return np.array(img.resize((224, 224)))
 
 
-def plot_squared_imgs(healthy_img: Image.Image, unhealthy_img: Image.Image):
+def plot_squared_imgs(
+    healthy_img: Image.Image,
+    unhealthy_img: Image.Image,
+    title1="Clean Image",
+    title2="Corrupted Image",
+):
     fig, axes = plt.subplots(1, 2, figsize=(5, 3))
     fig.subplots_adjust(wspace=0)
     axes[0].imshow(square_img(healthy_img))
-    axes[0].set_title("Healthy Image")
-    axes[0].axis("off")
+    axes[0].set_title(title1)
+    axes[0].set_xlabel("Clean Image", fontsize=12)
+    axes[0].set_xticks([])
+    axes[0].set_yticks([])
     axes[1].imshow(square_img(unhealthy_img))
-    axes[1].set_title("Corrupted Image")
-    axes[1].axis("off")
-    fig.tight_layout()
+    axes[1].set_title(title2)
+    axes[1].set_xlabel("Corrupted Image", fontsize=12)
+    axes[1].set_xticks([])
+    axes[1].set_yticks([])
+    # fig.tight_layout()
     return fig
 
 
